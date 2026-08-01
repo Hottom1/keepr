@@ -70,11 +70,11 @@ export default function LandingPage() {
               Handball &amp; Beach Handball · Goalkeepers
             </div>
             <h2 className="text-3xl md:text-4xl font-black tracking-tight leading-tight mb-4" style={{ color: INK }}>
-              Built for the goal.<br />Not the outfield.
+              Built for the goal.<br />Not the court.
             </h2>
             <p className="text-base text-gray-600 leading-relaxed mb-7 max-w-md">
-              Keepr is a drill library, 6-week block builder, match stat tracker, and AI coach —
-              all built specifically for handball goalkeepers, indoor and beach.
+              Keepr is a drill library, 6-week block builder, match stat tracker, and AI coach,
+              built specifically for handball goalkeepers, indoor and beach.
               No generic fitness programming adapted after the fact.
             </p>
             <div className="flex items-center gap-4 flex-wrap">
@@ -95,7 +95,7 @@ export default function LandingPage() {
           <div className="mt-12 md:mt-0">
             <GoalGridVisual />
             <p className="text-center text-[11px] text-gray-400 mt-3">
-              Save% by zone, logged shot by shot — indoor or beach scoring, done correctly.
+              Save% by zone, logged shot by shot: indoor or beach scoring, done correctly.
             </p>
           </div>
         </div>
@@ -105,7 +105,7 @@ export default function LandingPage() {
       <section style={{ background: INK }}>
         <div className="max-w-3xl mx-auto px-5 py-10 text-center">
           <p className="text-lg md:text-xl font-bold text-white leading-snug">
-            Most training tools are built for outfield players and adapted for keepers as an afterthought.
+            Most training tools are built for court players and adapted for keepers as an afterthought.
             <span style={{ color: TEAL }}> Keepr starts from the goal line.</span>
           </p>
         </div>
@@ -115,23 +115,23 @@ export default function LandingPage() {
       <section className="max-w-5xl mx-auto px-5 py-14">
         <div className="grid sm:grid-cols-2 gap-4">
           <FeatureCard Icon={BookOpen} title="A library that's actually about your position">
-            Drills organised by what a keeper actually trains — reflexes, diving &amp; ground work, footwork,
+            Drills organised by what a keeper actually trains: reflexes, diving &amp; ground work, footwork,
             positioning, shot reading, 1v1s, strength, and conditioning. Filtered by season, tagged by what
             you need to run them. Add your own alongside the built-in set.
           </FeatureCard>
-          <FeatureCard Icon={CalendarRange} title="A 6-week block, not a generic program">
-            Pick a goal — reaction speed, diving coverage, explosive power, footwork — and get a structured,
+          <FeatureCard Icon={CalendarRange} title="A 6-week block that actually progresses">
+            Pick a goal (reaction speed, diving coverage, explosive power, footwork) and get a structured,
             progressive 6-week block generated for you. Or build one from scratch, session by session.
             Either way, it's yours to edit.
           </FeatureCard>
-          <FeatureCard Icon={BarChart3} title="Stats that speak keeper, not just 'shots on target'">
+          <FeatureCard Icon={BarChart3} title="Stats that actually speak keeper">
             Tap a 3×3 goal grid to log every save and goal by zone. Live save% heatmaps, trend charts across
-            matches — and scoring that actually knows the difference between an indoor goal and a 2-point
+            matches, and scoring that actually knows the difference between an indoor goal and a 2-point
             beach handball spin shot.
           </FeatureCard>
           <FeatureCard Icon={Sparkles} title="Kip, an AI coach that knows your season">
-            Kip knows your level, discipline, availability, current block, and recent match stats — so its
-            advice is about your training, not a generic chatbot answer to a generic question.
+            Kip knows your level, discipline, availability, current block, and recent match stats, so its
+            advice is actually about your training.
           </FeatureCard>
         </div>
       </section>
@@ -151,7 +151,7 @@ export default function LandingPage() {
           </div>
           <div className="bg-white p-6 text-center">
             <p className="text-sm text-gray-600">
-              One app, two disciplines — drills, scoring, and shot types switch with you, not the other way around.
+              One app, two disciplines: drills, scoring, and shot types switch with you, not the other way around.
             </p>
           </div>
         </div>

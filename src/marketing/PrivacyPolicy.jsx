@@ -6,16 +6,16 @@ export default function PrivacyPolicy() {
       <p>
         Keepr is a training app for handball and beach handball goalkeepers. This page explains what
         information we collect, why, and what we do with it. We've tried to write it in plain language
-        rather than boilerplate — if anything's unclear, use the contact details at the bottom.
+        rather than boilerplate. If anything's unclear, use the contact details at the bottom.
       </p>
 
       <div>
         <h2 className="legal-h2">Information we collect</h2>
         <p><b>Account information:</b> your email address and password, handled by our authentication
         provider (Supabase). We never see or store your password in plain text.</p>
-        <p className="mt-2"><b>Training profile:</b> anything you enter to personalise your training —
-        level, discipline, availability, equipment access, self-rated weaknesses, and any niggles or
-        injuries you choose to log.</p>
+        <p className="mt-2"><b>Training profile:</b> anything you enter to personalise your training,
+        including level, discipline, availability, equipment access, self-rated weaknesses, and any
+        niggles or injuries you choose to log.</p>
         <p className="mt-2"><b>Training data:</b> the exercises you add, the training blocks you build,
         and the session logs (effort ratings, notes) you record.</p>
         <p className="mt-2"><b>Match stats:</b> matches you add and the shots you log against them
@@ -35,15 +35,15 @@ export default function PrivacyPolicy() {
         <h2 className="legal-h2">Who else sees it</h2>
         <p>We use a small number of service providers to run Keepr, each of whom only sees what they
         need to do their job:</p>
-        <p className="mt-2"><b>Supabase</b> — hosts our database and handles authentication. Your
+        <p className="mt-2"><b>Supabase:</b> hosts our database and handles authentication. Your
         account and training data are stored here, protected by row-level security so that only your
         own signed-in session can read or write it.</p>
-        <p className="mt-2"><b>Anthropic</b> — when you message Kip, that conversation (along with the
+        <p className="mt-2"><b>Anthropic:</b> when you message Kip, that conversation (along with the
         relevant training context needed to make Kip's advice useful) is sent to Anthropic's API to
-        generate a response. This request is routed through our own server-side function — your
+        generate a response. This request is routed through our own server-side function. Your
         message never carries your password or account credentials, and our API credentials never
         reach your browser.</p>
-        <p className="mt-2"><b>Netlify</b> — hosts the application itself and the serverless function
+        <p className="mt-2"><b>Netlify:</b> hosts the application itself and the serverless function
         that talks to Anthropic.</p>
         <p className="mt-2">We don't share your data with anyone else, and we don't use third-party
         advertising or analytics trackers.</p>
@@ -58,7 +58,7 @@ export default function PrivacyPolicy() {
       <div>
         <h2 className="legal-h2">Data security</h2>
         <p>Your data is stored in a database protected by row-level security, meaning it's only
-        accessible to your own authenticated account — not to other users, and not to us browsing
+        accessible to your own authenticated account, not to other users, and not to us browsing
         the database casually. Passwords are hashed and managed entirely by our authentication
         provider; we never handle them directly.</p>
       </div>

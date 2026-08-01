@@ -5,7 +5,7 @@ export default function TermsOfService() {
     <LegalLayout title="Terms of Service" updated="August 1, 2026">
       <p>
         These terms cover your use of Keepr. By creating an account, you agree to them. They're written
-        in plain language on purpose — if something's unclear, contact us before you rely on it.
+        in plain language on purpose. If something's unclear, contact us before you rely on it.
       </p>
 
       <div>
@@ -32,11 +32,11 @@ export default function TermsOfService() {
       <div>
         <h2 className="legal-h2">Kip isn't a medical or licensed coaching professional</h2>
         <p>Kip is an AI assistant, not a doctor, physiotherapist, or certified coach. Its advice is
-        informational and based on the context you give it — it doesn't know your body, your history,
+        informational and based on the context you give it. It doesn't know your body, your history,
         or anything you haven't told it. Kip won't diagnose injuries or tell you to train through real
         pain, and neither should you: for anything beyond mild soreness or normal fatigue, see a
-        physiotherapist or doctor before continuing to train. Training as a goalkeeper — diving,
-        sliding, repeated impact — carries a real risk of injury regardless of what any app tells you.
+        physiotherapist or doctor before continuing to train. Training as a goalkeeper (diving,
+        sliding, repeated impact) carries a real risk of injury regardless of what any app tells you.
         Use your judgment, warm up properly, and don't push through pain that doesn't feel normal.</p>
       </div>
 
@@ -44,7 +44,7 @@ export default function TermsOfService() {
         <h2 className="legal-h2">Your content</h2>
         <p>Custom exercises, training blocks, match stats, and anything else you add to Keepr are
         yours. We store it to run the app and don't claim ownership of it. You're responsible for what
-        you enter — don't upload anything you don't have the right to share.</p>
+        you enter. Don't upload anything you don't have the right to share.</p>
       </div>
 
       <div>
