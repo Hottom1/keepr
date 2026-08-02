@@ -4,7 +4,7 @@ import {
   Waves, Snowflake, Trash2, Check, Pencil, CalendarRange, Target,
   Users, User, ListChecks, BookOpen, ArrowLeft, Circle, CheckCircle2,
   Lightbulb, Eye, ShieldCheck, Zap, Brain, Compass, MessageCircle,
-  Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut,
+  Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { loadUserData, saveUserData } from "./lib/storage.js";
@@ -22,6 +22,7 @@ import { useAuth } from "./auth/AuthProvider.jsx";
 /* ---------------------------------------------------------------- */
 
 const CATS = [
+  "Warm-Up",
   "Reflexes",
   "Diving & Ground Work",
   "Footwork & Agility",
@@ -87,6 +88,10 @@ const DEFAULT_EXERCISES = [
   { id: "e47", name: "Directed Outlet Pass Drill", category: "Fast Break & Distribution", type: "Team", season: "Both", equipment: "Ball, 2+ players", format: "5 x 8", desc: "After each save, a coach or teammate signals which side to release the outlet pass to. Builds the habit of scanning for the break before the ball even arrives." },
   { id: "e48", name: "Ready Stance Fundamentals", category: "Positioning", type: "Solo", season: "Both", equipment: "Mirror (optional)", format: "5 x 30s holds", desc: "Set and hold the base ready stance: feet shoulder-width apart, knees bent, weight forward, hands up and slightly ahead with palms out and fingers spread, eyes on the ball carrier. A simple check-and-reset drill worth revisiting even at senior level." },
   { id: "e49", name: "Basic Catch Fundamentals", category: "Reflexes", type: "Partner", season: "Both", equipment: "Ball", format: "4 x 15", desc: "Partner tosses or rolls the ball straight at you from close range. Focus purely on clean hand positioning and secure control rather than power or placement — the foundation every other catching drill builds on. Increase toss speed only once catches are consistently clean." },
+  { id: "e50", name: "Pre-Session Activation Sequence", category: "Warm-Up", type: "Solo", season: "Both", equipment: "None", format: "5-7 min", desc: "A short raise-mobilise-activate sequence to run before any session or match: light aerobic raise (jogging, skipping), dynamic mobility through hips, ankles and shoulders, then activation for glutes and shoulder stabilisers. Not a stretching routine — the goal is to raise body temperature and switch muscles on, not lengthen them." },
+  { id: "e51", name: "Footwork & Reaction Priming", category: "Warm-Up", type: "Partner", season: "Both", equipment: "Ball (optional)", format: "6-8 min", desc: "Progressive footwork and reaction priming to run immediately before facing live shots: shuffles and split-steps building in intensity, then a handful of low-pressure reaction reps against a partner's throw. The aim is to have your feet and eyes switched on for the first real shot of the session, not have that shot be your first movement of the day." },
+  { id: "e52", name: "Noise-Filter Reaction Drill", category: "Reflexes", type: "Partner", season: "Both", equipment: "Ball, plus a second person or noise source", format: "4 x 10", desc: "A standard reaction drill — partner throws, you save — with deliberate noise layered on top: a second person shouting numbers or contradictory calls, or crowd noise playing while you react to the real throw. Unlike cue-reading drills, which train you to pick up a signal, this trains you to filter out everything that isn't the signal — a distinct skill under real match noise." },
+  { id: "e53", name: "Multi-Target Tracking Drill", category: "Positioning", type: "Team", season: "Both", equipment: "Ball, 3+ players", format: "5 x 6", desc: "Two or more attackers move and pass around the top of the D while you track all of them and adjust your position continuously, with a shot coming from whichever one is called when the coach signals. Unlike single-thrower drills, there's no one player to lock onto — the skill here is holding awareness of multiple moving threats and the space between them at once, not reading one release." },
 ];
 
 const GOALS = [
@@ -173,19 +178,56 @@ const ADVICE_TOPICS = [
     ],
   },
   {
-    id: "mental",
-    title: "The Mental Side",
-    icon: "Brain",
-    summary: "Short, repeatable habits beat trying to 'feel confident' on the day.",
+    id: "processgoals",
+    title: "Process Goals vs. Outcome Goals",
+    icon: "Target",
+    summary: "What you did right beats what the scoreboard says, most nights.",
     tips: [
-      "A save you should have made and a shot that was never save-able feel the same in the moment — sort out which was which afterwards, not during the game.",
-      "Build a short reset routine — a breath, a phrase, a stance check — that you use after every goal conceded, regardless of whose fault it was.",
-      "Confidence comes from repetition banked in training, not from trying to summon it on match day.",
+      "An outcome goal ('concede under 10') tells you nothing about what to actually do differently in the moment. A process goal ('set my feet before every dive') does — it's something you can control and check against, save by save.",
+      "Pick one process goal per session or match, not five. One thing you can hold in your head under pressure beats a checklist you'll forget by the second attack.",
+      "You can nail every process goal and still lose on shot luck, or skip all of them and win anyway. Judge the goal on whether you did it, not on the scoreline.",
+      "Write the goal down before you start. Reviewing it against what actually happened afterwards, honestly, is where the improvement lives — not in having set it.",
+    ],
+  },
+  {
+    id: "fearfailure",
+    title: "Fear of Failure & Self-Doubt",
+    icon: "Brain",
+    summary: "The keeper position makes every mistake visible. That's not a character flaw to fix.",
+    tips: [
+      "Every goal you concede is watched by everyone on the court, in a way an outfield mistake usually isn't. That visibility is structural to the position, not a sign you're not cut out for it.",
+      "Fear of failure often shows up as hesitation — a step you don't commit to, a dive half-started. Naming it as fear, specifically, is more useful than just telling yourself to 'be more confident.'",
+      "Self-doubt after a bad run tends to generalise ('I'm bad at this') when the honest version is usually specific ('I'm reading low shots late this week'). Specific is fixable. General isn't.",
+      "Confidence built from avoiding risk holds up badly under pressure. Confidence built from committing and reviewing what happened, good or bad, holds up better.",
+    ],
+  },
+  {
+    id: "weakeropposition",
+    title: "Staying Sharp Against Weaker Opposition",
+    icon: "Flame",
+    summary: "Complacency costs goals just as often as nerves do — it's just quieter about it.",
+    tips: [
+      "Concentration drops when the shots feel routine. That's exactly when a soft, avoidable goal against a weaker team does more damage to your season save% than a good save against a strong one helps it.",
+      "Treat every shot as the first one of the match, not the fortieth against a team you're beating comfortably. The scoreboard doesn't care how the goal went in.",
+      "If a game feels easy, that's a cue to sharpen your focus, not relax it — deliberately reset your concentration between phases of play rather than letting it drift with the score.",
+      "Lopsided games are good practice for something specific: staying switched on with low shot volume. That's a real, transferable skill, not dead time.",
+    ],
+  },
+  {
+    id: "emotionreset",
+    title: "Resetting After a Goal",
+    icon: "RotateCcw",
+    summary: "The next shot doesn't know or care about the last one. Your job is to not let it either.",
+    tips: [
+      "A goal that beats you cleanly and a goal you should have saved feel identical in the moment. Sorting out which was which is a job for after the match, not the next 10 seconds.",
+      "Build a short, physical reset — a breath, a phrase, resetting your stance — and use it after every goal conceded, regardless of whose fault it was. The consistency matters more than what the routine actually is.",
+      "Dwelling on the last goal costs you reaction time on the next shot. That's not a mental toughness failing, it's just where your attention is pointed — and attention is something you can redirect on purpose.",
+      "A visible reaction is information for the attack, not just a release for you. Neutral body language after a goal is a tactical choice, not fake positivity.",
     ],
   },
 ];
 
-const ADVICE_ICONS = { Compass, Eye, ShieldCheck, Zap, Waves, Brain };
+const ADVICE_ICONS = { Compass, Eye, ShieldCheck, Zap, Waves, Brain, Target, Flame, RotateCcw };
 
 const LEVELS = ["Social", "Club", "State", "National", "International"];
 const DISCIPLINES = ["Indoor", "Beach", "Both"];
@@ -297,7 +339,7 @@ function buildKipSystemPrompt(profile, plans, season, matches) {
   plans.forEach((p) => {
     p.weeks.forEach((w) => {
       w.sessions.forEach((s) => {
-        if (s.completed) recentLogs.push({ plan: p.name, week: w.weekNumber, session: s.sessionNumber, rpe: s.rpe, note: s.note });
+        if (s.completed) recentLogs.push({ plan: p.name, week: w.weekNumber, session: s.sessionNumber, focus: s.focus, rpe: s.rpe, note: s.note });
       });
     });
   });
@@ -325,7 +367,7 @@ function buildKipSystemPrompt(profile, plans, season, matches) {
       : "No saved training block yet — encourage them to build one, or talk through what they need in the meantime.",
     "",
     "RECENT SESSION LOGS:",
-    lastLogs.length ? lastLogs.map((l) => `${l.plan} W${l.week} S${l.session}${l.rpe ? ` — RPE ${l.rpe}` : ""}${l.note ? ` — "${l.note}"` : ""}`).join("\n") : "No completed sessions logged yet.",
+    lastLogs.length ? lastLogs.map((l) => `${l.plan} W${l.week} S${l.session}${l.focus ? ` — focus was: "${l.focus}"` : ""}${l.rpe ? ` — RPE ${l.rpe}` : ""}${l.note ? ` — "${l.note}"` : ""}`).join("\n") : "No completed sessions logged yet.",
     "",
     "MATCH STATS:",
     (() => {
@@ -366,7 +408,7 @@ function generateGoalBlock(name, season, goalId, exercises) {
         cursor += 1;
         return { entryId: uid(), exerciseId: ex.id, prescription: ex.format };
       });
-      return { sessionId: uid(), sessionNumber: sIdx + 1, exercises: exs, completed: false };
+      return { sessionId: uid(), sessionNumber: sIdx + 1, exercises: exs, completed: false, focus: "" };
     });
     return { weekId: uid(), weekNumber, focus: phase.label, sessions };
   });
@@ -391,6 +433,7 @@ function generateFreeformBlock(name, season, sessionsPerWeek) {
       sessionNumber: sIdx + 1,
       exercises: [],
       completed: false,
+      focus: "",
     })),
   }));
   return {
@@ -1201,6 +1244,19 @@ function ExercisePickerModal({ exercises, onClose, onPick }) {
 /* Plans                                                              */
 /* ---------------------------------------------------------------- */
 
+function SessionFocusInput({ value, onSave }) {
+  const [local, setLocal] = useState(value);
+  return (
+    <input
+      value={local}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={() => { if (local !== value) onSave(local); }}
+      placeholder="Focus for this session (optional)"
+      className="block w-full pl-5 text-[11px] text-gray-600 bg-transparent outline-none mb-1 placeholder:text-gray-300"
+    />
+  );
+}
+
 function Plans({ plans, exercises, onSave, onDelete }) {
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -1267,7 +1323,7 @@ function Plans({ plans, exercises, onSave, onDelete }) {
                                 };
                                 onSave(next);
                               } else {
-                                setLogTarget({ plan: p, weekId: w.weekId, sessionId: s.sessionId });
+                                setLogTarget({ plan: p, weekId: w.weekId, sessionId: s.sessionId, focus: s.focus });
                               }
                             }}
                             className="flex items-center gap-1.5 text-xs font-bold mb-1"
@@ -1280,6 +1336,21 @@ function Plans({ plans, exercises, onSave, onDelete }) {
                               </span>
                             )}
                           </button>
+                          {!s.completed && (
+                            <SessionFocusInput
+                              value={s.focus || ""}
+                              onSave={(val) => {
+                                const next = {
+                                  ...p,
+                                  weeks: p.weeks.map((ww) => ww.weekId === w.weekId
+                                    ? { ...ww, sessions: ww.sessions.map((ss) => ss.sessionId === s.sessionId ? { ...ss, focus: val } : ss) }
+                                    : ww),
+                                };
+                                onSave(next);
+                              }}
+                            />
+                          )}
+                          {s.completed && s.focus && <div className="pl-5 text-[11px] text-gray-500 mb-1">Focus: <span className="italic">"{s.focus}"</span></div>}
                           {s.completed && s.note && <div className="pl-5 text-[11px] text-gray-500 italic mb-1">"{s.note}"</div>}
                           <div className="pl-5 space-y-0.5">
                             {s.exercises.map((entry) => {
@@ -1325,6 +1396,7 @@ function Plans({ plans, exercises, onSave, onDelete }) {
 
       {logTarget && (
         <LogSessionModal
+          focus={logTarget.focus}
           onClose={() => setLogTarget(null)}
           onSave={({ rpe, note }) => {
             const { plan, weekId, sessionId } = logTarget;
@@ -1343,13 +1415,19 @@ function Plans({ plans, exercises, onSave, onDelete }) {
   );
 }
 
-function LogSessionModal({ onClose, onSave }) {
+function LogSessionModal({ onClose, onSave, focus }) {
   const [rpe, setRpe] = useState(null);
   const [note, setNote] = useState("");
   return (
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Log this session</h3>
       <p className="text-xs text-gray-500 mb-3">Optional — but it's what Kip uses to adjust your next sessions.</p>
+      {focus && (
+        <div className="mb-3 p-2.5 rounded-lg text-xs" style={{ background: "#F3F2ED" }}>
+          <span className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-0.5">Your focus was</span>
+          <span style={{ color: "#12213A" }}>"{focus}"</span>
+        </div>
+      )}
       <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">RPE (effort, 1–10)</div>
       <div className="grid grid-cols-5 gap-1.5 mb-3">
         {Array.from({ length: 10 }).map((_, i) => {
