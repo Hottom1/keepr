@@ -4,7 +4,7 @@ import {
   Waves, Snowflake, Trash2, Check, Pencil, CalendarRange, Target,
   Users, User, ListChecks, BookOpen, ArrowLeft, Circle, CheckCircle2,
   Lightbulb, Eye, ShieldCheck, Zap, Brain, Compass, MessageCircle,
-  Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw,
+  Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw, Video,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { loadUserData, saveUserData } from "./lib/storage.js";
@@ -324,6 +324,58 @@ function aggregateShotTypeStats(matches) {
   return map;
 }
 
+// Best-effort record: only counts matches whose free-text "result" field ends in a
+// standalone W/L/D (the form's own placeholder convention, e.g. "24-19 W"). Matches that
+// don't parse still count toward the match total and save% below, just not the record.
+function opponentRecord(matches, opponentName, excludeId) {
+  const norm = (s) => (s || "").trim().toLowerCase();
+  const target = norm(opponentName);
+  if (!target) return null;
+  const prior = matches.filter((m) => m.id !== excludeId && norm(m.opponent) === target);
+  if (prior.length === 0) return null;
+  let wins = 0, losses = 0, draws = 0, saves = 0, shots = 0;
+  prior.forEach((m) => {
+    const letter = (m.result || "").trim().toUpperCase().match(/\b([WLD])\s*$/)?.[1];
+    if (letter === "W") wins++;
+    else if (letter === "L") losses++;
+    else if (letter === "D") draws++;
+    (m.shots || []).forEach((s) => {
+      shots++;
+      if (s.outcome === "Save") saves++;
+    });
+  });
+  return {
+    count: prior.length,
+    wins, losses, draws,
+    recordKnown: wins + losses + draws > 0,
+    savePct: shots > 0 ? Math.round((saves / shots) * 100) : null,
+    shots,
+  };
+}
+
+// mm:ss or h:mm:ss free text (matches whatever convention the keeper's video platform uses).
+function parseTimestampToSeconds(ts) {
+  if (!ts) return null;
+  const parts = ts.split(":").map((p) => Number(p.trim()));
+  if (parts.length === 0 || parts.some((n) => Number.isNaN(n))) return null;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0];
+}
+
+// Deep-links only for recognisable YouTube URLs (the one host with a reliable &t= param);
+// everything else falls back to the plain video link — no automatic detection, per the brief.
+function videoLinkForShot(videoUrl, timestamp) {
+  if (!videoUrl) return null;
+  const seconds = parseTimestampToSeconds(timestamp);
+  if (seconds == null) return videoUrl;
+  if (/youtu\.?be/i.test(videoUrl)) {
+    const sep = videoUrl.includes("?") ? "&" : "?";
+    return `${videoUrl}${sep}t=${seconds}s`;
+  }
+  return videoUrl;
+}
+
 function zoneColor(z) {
   const total = z.saves + z.goals;
   if (total === 0) return "#F3F2ED";
@@ -445,6 +497,77 @@ function generateFreeformBlock(name, season, sessionsPerWeek) {
     createdAt: new Date().toISOString(),
     weeks,
   };
+}
+
+function completedSessionsWithMeta(plans) {
+  const out = [];
+  plans.forEach((p) => {
+    p.weeks.forEach((w) => {
+      w.sessions.forEach((s) => {
+        if (s.completed) out.push({ plan: p, week: w, session: s });
+      });
+    });
+  });
+  return out;
+}
+
+function rpeTrend(plans) {
+  return completedSessionsWithMeta(plans)
+    .filter(({ session }) => session.rpe && session.completedAt)
+    .sort((a, b) => new Date(a.session.completedAt) - new Date(b.session.completedAt))
+    .slice(-20)
+    .map(({ session }) => ({
+      date: new Date(session.completedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      rpe: session.rpe,
+    }));
+}
+
+// Monday-start week key, used so a streak counts calendar weeks rather than rolling 7-day windows.
+function weekStartKey(dateLike) {
+  const dt = new Date(dateLike);
+  const day = (dt.getDay() + 6) % 7;
+  dt.setDate(dt.getDate() - day);
+  dt.setHours(0, 0, 0, 0);
+  return dt.toISOString().slice(0, 10);
+}
+
+function weeklyStreak(plans) {
+  const weeksWithSessions = new Set();
+  completedSessionsWithMeta(plans).forEach(({ session }) => {
+    if (session.completedAt) weeksWithSessions.add(weekStartKey(session.completedAt));
+  });
+  if (weeksWithSessions.size === 0) return 0;
+  const cursor = new Date();
+  // Don't zero the streak just because this week hasn't happened yet — it isn't over.
+  if (!weeksWithSessions.has(weekStartKey(cursor))) {
+    cursor.setDate(cursor.getDate() - 7);
+  }
+  let streak = 0;
+  while (weeksWithSessions.has(weekStartKey(cursor))) {
+    streak++;
+    cursor.setDate(cursor.getDate() - 7);
+  }
+  return streak;
+}
+
+// "Due soonest" is inferred from plan.createdAt + a 7-day-per-week offset, since sessions
+// have no explicit schedule — this is the closest honest proxy available in the data.
+function nextSuggestedSession(plans) {
+  let best = null;
+  plans.forEach((p) => {
+    const created = new Date(p.createdAt);
+    p.weeks.forEach((w) => {
+      w.sessions.forEach((s) => {
+        if (s.completed) return;
+        const impliedDate = new Date(created);
+        impliedDate.setDate(impliedDate.getDate() + (w.weekNumber - 1) * 7);
+        if (!best || impliedDate < best.impliedDate) {
+          best = { plan: p, week: w, session: s, impliedDate };
+        }
+      });
+    });
+  });
+  return best;
 }
 
 /* ---------------------------------------------------------------- */
@@ -1244,7 +1367,7 @@ function ExercisePickerModal({ exercises, onClose, onPick }) {
 /* Plans                                                              */
 /* ---------------------------------------------------------------- */
 
-function SessionFocusInput({ value, onSave }) {
+function SessionFocusInput({ value, onSave, className }) {
   const [local, setLocal] = useState(value);
   return (
     <input
@@ -1252,7 +1375,7 @@ function SessionFocusInput({ value, onSave }) {
       onChange={(e) => setLocal(e.target.value)}
       onBlur={() => { if (local !== value) onSave(local); }}
       placeholder="Focus for this session (optional)"
-      className="block w-full pl-5 text-[11px] text-gray-600 bg-transparent outline-none mb-1 placeholder:text-gray-300"
+      className={className || "block w-full pl-5 text-[11px] text-gray-600 bg-transparent outline-none mb-1 placeholder:text-gray-300"}
     />
   );
 }
@@ -1285,8 +1408,81 @@ function Plans({ plans, exercises, onSave, onDelete }) {
     );
   }
 
+  const streak = weeklyStreak(plans);
+  const next = nextSuggestedSession(plans);
+  const trend = rpeTrend(plans);
+
   return (
     <div className="px-4 pt-4 pb-6 space-y-3">
+      {streak > 0 && (
+        <div className="flex items-center gap-1.5 text-xs font-bold" style={{ color: "#12213A" }}>
+          <Flame size={14} color="#E2984B" /> {streak}-week streak
+        </div>
+      )}
+
+      {next ? (
+        <div className="rounded-lg border-2 p-3" style={{ borderColor: "#0E8388", background: "#fff" }}>
+          <div className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>Today</div>
+          <div className="text-sm font-bold mb-0.5" style={{ color: "#12213A" }}>
+            {next.plan.name} — Week {next.week.weekNumber}, Session {next.session.sessionNumber}
+          </div>
+          {next.week.focus && <div className="text-[11px] text-gray-500 mb-1.5">{next.week.focus}</div>}
+          <div className="space-y-0.5 mb-2">
+            {next.session.exercises.slice(0, 4).map((entry) => {
+              const ex = exercises.find((e) => e.id === entry.exerciseId);
+              if (!ex) return null;
+              return <div key={entry.entryId} className="text-[11px] text-gray-600">{ex.name}</div>;
+            })}
+            {next.session.exercises.length === 0 && <div className="text-[11px] text-gray-400">No exercises added yet</div>}
+          </div>
+          <SessionFocusInput
+            className="input text-xs mb-2"
+            value={next.session.focus || ""}
+            onSave={(val) => {
+              const nextPlan = {
+                ...next.plan,
+                weeks: next.plan.weeks.map((ww) => ww.weekId === next.week.weekId
+                  ? { ...ww, sessions: ww.sessions.map((ss) => ss.sessionId === next.session.sessionId ? { ...ss, focus: val } : ss) }
+                  : ww),
+              };
+              onSave(nextPlan);
+            }}
+          />
+          <button
+            onClick={() => setLogTarget({ plan: next.plan, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus })}
+            className="w-full py-2 rounded-lg text-xs font-bold text-white"
+            style={{ background: "#0E8388" }}
+          >
+            Log this session
+          </button>
+          <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+        </div>
+      ) : (
+        <div className="bg-white rounded-lg border p-3 text-center" style={{ borderColor: "#DAD7CC" }}>
+          <CheckCircle2 size={18} color="#0E8388" className="mx-auto mb-1" />
+          <div className="text-xs font-bold" style={{ color: "#12213A" }}>All caught up</div>
+          <div className="text-[11px] text-gray-500">Every session in your plans is logged.</div>
+        </div>
+      )}
+
+      {trend.length > 1 && (
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5 flex items-center gap-1">
+            <TrendingUp size={12} /> Training load (RPE) over time
+          </div>
+          <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+            <ResponsiveContainer width="100%" height={140}>
+              <LineChart data={trend}>
+                <XAxis dataKey="date" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={40} />
+                <YAxis domain={[0, 10]} tick={{ fontSize: 9 }} width={20} />
+                <Tooltip />
+                <Line type="monotone" dataKey="rpe" stroke="#12213A" strokeWidth={2} dot={{ r: 3 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
       {plans.map((p) => {
         const open = openId === p.id;
         const totalSessions = p.weeks.reduce((a, w) => a + w.sessions.length, 0);
@@ -1403,7 +1599,7 @@ function Plans({ plans, exercises, onSave, onDelete }) {
             const next = {
               ...plan,
               weeks: plan.weeks.map((ww) => ww.weekId === weekId
-                ? { ...ww, sessions: ww.sessions.map((ss) => ss.sessionId === sessionId ? { ...ss, completed: true, rpe, note } : ss) }
+                ? { ...ww, sessions: ww.sessions.map((ss) => ss.sessionId === sessionId ? { ...ss, completed: true, rpe, note, completedAt: new Date().toISOString() } : ss) }
                 : ww),
             };
             onSave(next);
@@ -1843,9 +2039,11 @@ function GoalGrid({ zones, onZoneTap, size = "normal" }) {
   );
 }
 
-function ShotLogModal({ season, zone, onClose, onSave }) {
+function ShotLogModal({ season, zone, videoUrl, onClose, onSave }) {
   const [outcome, setOutcome] = useState(null);
+  const [timestamp, setTimestamp] = useState("");
   const types = shotTypesFor(season);
+  const videoTimestamp = timestamp.trim() || null;
 
   return (
     <Modal onClose={onClose}>
@@ -1864,11 +2062,19 @@ function ShotLogModal({ season, zone, onClose, onSave }) {
           <p className="text-xs text-gray-500 mb-3">
             {outcome} — {season === "Summer" ? "what type of shot?" : "shot origin (optional)"}
           </p>
+          {videoUrl && (
+            <input
+              className="input mb-3"
+              placeholder="Video timestamp, e.g. 12:34 (optional)"
+              value={timestamp}
+              onChange={(e) => setTimestamp(e.target.value)}
+            />
+          )}
           <div className="flex flex-wrap gap-1.5 mb-3">
             {types.map((t) => (
               <button
                 key={t}
-                onClick={() => onSave({ zone, outcome, shotType: t })}
+                onClick={() => onSave({ zone, outcome, shotType: t, videoTimestamp })}
                 className="px-3 py-2 rounded-lg text-xs font-bold border"
                 style={{ borderColor: "#DAD7CC" }}
               >
@@ -1882,7 +2088,7 @@ function ShotLogModal({ season, zone, onClose, onSave }) {
             ))}
           </div>
           {season !== "Summer" && (
-            <button onClick={() => onSave({ zone, outcome, shotType: null })} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
+            <button onClick={() => onSave({ zone, outcome, shotType: null, videoTimestamp })} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
               Log without a type
             </button>
           )}
@@ -1892,8 +2098,20 @@ function ShotLogModal({ season, zone, onClose, onSave }) {
   );
 }
 
-function MatchFormModal({ season, onClose, onSave }) {
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season });
+function OpponentHistoryNote({ matches, opponent, excludeId }) {
+  const rec = opponentRecord(matches, opponent, excludeId);
+  if (!rec) return null;
+  return (
+    <div className="text-[11px] text-gray-500 mt-1">
+      {rec.count} previous match{rec.count !== 1 ? "es" : ""} vs {opponent.trim()}
+      {rec.recordKnown && ` · ${rec.wins}W-${rec.losses}L${rec.draws ? `-${rec.draws}D` : ""}`}
+      {rec.savePct !== null && ` · ${rec.savePct}% saved`}
+    </div>
+  );
+}
+
+function MatchFormModal({ season, matches, onClose, onSave }) {
+  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "" });
   const valid = form.date && form.opponent.trim();
   return (
     <Modal onClose={onClose}>
@@ -1904,6 +2122,7 @@ function MatchFormModal({ season, onClose, onSave }) {
         </Field>
         <Field label="Opponent">
           <input className="input" placeholder="e.g. North Shore" value={form.opponent} onChange={(e) => setForm({ ...form, opponent: e.target.value })} />
+          <OpponentHistoryNote matches={matches} opponent={form.opponent} />
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Competition">
@@ -1923,6 +2142,9 @@ function MatchFormModal({ season, onClose, onSave }) {
             ))}
           </div>
         </Field>
+        <Field label="Video link (optional)">
+          <input className="input" placeholder="YouTube, Drive, wherever the footage lives" value={form.videoUrl} onChange={(e) => setForm({ ...form, videoUrl: e.target.value })} />
+        </Field>
         <button disabled={!valid} onClick={() => onSave({ id: uid(), ...form, shots: [] })} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
           Create match
         </button>
@@ -1931,7 +2153,39 @@ function MatchFormModal({ season, onClose, onSave }) {
   );
 }
 
-function MatchDetail({ match, onBack, onSave, onDelete }) {
+function MatchVideoLink({ match, onSave }) {
+  const [editing, setEditing] = useState(!match.videoUrl);
+  const [local, setLocal] = useState(match.videoUrl || "");
+  if (editing) {
+    return (
+      <div className="flex items-center gap-2 mt-2">
+        <input
+          className="input flex-1"
+          placeholder="Video link (YouTube, Drive, etc.)"
+          value={local}
+          onChange={(e) => setLocal(e.target.value)}
+        />
+        <button
+          onClick={() => { onSave(local.trim()); setEditing(false); }}
+          className="text-xs font-bold px-2.5 py-1.5 rounded-lg text-white shrink-0"
+          style={{ background: "#0E8388" }}
+        >
+          Save
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-3 mt-2">
+      <a href={match.videoUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
+        <Video size={13} /> Watch video
+      </a>
+      <button onClick={() => { setLocal(match.videoUrl); setEditing(true); }} className="text-[11px] text-gray-400 font-semibold">Edit</button>
+    </div>
+  );
+}
+
+function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
   const [zoneTap, setZoneTap] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const zones = emptyZoneMap();
@@ -1946,8 +2200,8 @@ function MatchDetail({ match, onBack, onSave, onDelete }) {
   const totalPoints = (match.shots || []).reduce((a, s) => a + (s.outcome === "Goal" ? pointsForShot(match.season, s.shotType) : 0), 0);
   const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
 
-  function logShot({ zone, outcome, shotType }) {
-    const shot = { id: uid(), zone, outcome, shotType: shotType || null };
+  function logShot({ zone, outcome, shotType, videoTimestamp }) {
+    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null };
     onSave({ ...match, shots: [...(match.shots || []), shot] });
     setZoneTap(null);
   }
@@ -1964,9 +2218,12 @@ function MatchDetail({ match, onBack, onSave, onDelete }) {
         <div>
           <div className="text-lg font-black" style={{ color: "#12213A" }}>vs {match.opponent}</div>
           <div className="text-xs text-gray-500">{match.date}{match.competition ? ` · ${match.competition}` : ""}{match.result ? ` · ${match.result}` : ""}</div>
+          <OpponentHistoryNote matches={matches} opponent={match.opponent} excludeId={match.id} />
         </div>
         <SeasonBadge season={match.season} />
       </div>
+
+      <MatchVideoLink match={match} onSave={(videoUrl) => onSave({ ...match, videoUrl })} />
 
       <div className="grid grid-cols-3 gap-2 my-4">
         <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
@@ -1999,6 +2256,11 @@ function MatchDetail({ match, onBack, onSave, onDelete }) {
                   {s.outcome === "Goal" && match.season === "Summer" && (
                     <span className="text-[10px] font-black" style={{ color: "#8A8779" }}>+{pointsForShot(match.season, s.shotType)}</span>
                   )}
+                  {s.videoTimestamp && match.videoUrl && (
+                    <a href={videoLinkForShot(match.videoUrl, s.videoTimestamp)} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+                      <Video size={10} /> {s.videoTimestamp}
+                    </a>
+                  )}
                 </div>
                 <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
               </div>
@@ -2011,7 +2273,7 @@ function MatchDetail({ match, onBack, onSave, onDelete }) {
         <Trash2 size={12} /> Delete match
       </button>
 
-      {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} onClose={() => setZoneTap(null)} onSave={logShot} />}
+      {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} onClose={() => setZoneTap(null)} onSave={logShot} />}
 
       {confirmDelete && (
         <Modal onClose={() => setConfirmDelete(false)}>
@@ -2034,7 +2296,7 @@ function StatsTab({ matches, season, onSave, onDelete }) {
 
   const openMatch = matches.find((m) => m.id === openMatchId);
   if (openMatch) {
-    return <MatchDetail match={openMatch} onBack={() => setOpenMatchId(null)} onSave={onSave} onDelete={onDelete} />;
+    return <MatchDetail match={openMatch} matches={matches} onBack={() => setOpenMatchId(null)} onSave={onSave} onDelete={onDelete} />;
   }
 
   const agg = aggregateMatchStats(matches, filter);
@@ -2162,6 +2424,7 @@ function StatsTab({ matches, season, onSave, onDelete }) {
       {showForm && (
         <MatchFormModal
           season={season}
+          matches={matches}
           onClose={() => setShowForm(false)}
           onSave={(m) => { onSave(m); setShowForm(false); setOpenMatchId(m.id); }}
         />
