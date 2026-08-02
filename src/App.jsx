@@ -893,7 +893,6 @@ export default function GKTrainerApp() {
           <Library
             exercises={allExercises}
             season={season}
-            plans={plans}
             onAdd={addExercise}
             onDelete={deleteExercise}
           />
@@ -918,7 +917,7 @@ export default function GKTrainerApp() {
         )}
         {tab === "advice" && <AdviceHub />}
         {tab === "stats" && (
-          <StatsTab matches={matches} season={season} onSave={saveMatch} onDelete={deleteMatch} />
+          <StatsTab matches={matches} season={season} onSave={saveMatch} onDelete={deleteMatch} plans={plans} exercises={allExercises} />
         )}
         {tab === "kip" && (
           <KipTab
@@ -1028,7 +1027,7 @@ function BottomNav({ tab, setTab }) {
 /* Library                                                            */
 /* ---------------------------------------------------------------- */
 
-function Library({ exercises, season, plans, onAdd, onDelete }) {
+function Library({ exercises, season, onAdd, onDelete }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState(null);
   const [type, setType] = useState(null);
@@ -1102,7 +1101,6 @@ function Library({ exercises, season, plans, onAdd, onDelete }) {
       {detail && (
         <ExerciseDetailModal
           ex={detail}
-          plans={plans}
           onClose={() => setDetail(null)}
           onDelete={
             detail.custom
@@ -1146,10 +1144,7 @@ function ExerciseRow({ ex, onClick }) {
   );
 }
 
-function ExerciseDetailModal({ ex, plans = [], onClose, onDelete }) {
-  const history = ex.type === "Gym" ? exerciseLogHistory(plans, ex.id) : [];
-  const prs = history.filter((h) => h.isPr);
-
+function ExerciseDetailModal({ ex, onClose, onDelete }) {
   return (
     <Modal onClose={onClose}>
       <div className="flex items-start justify-between mb-1">
@@ -1193,7 +1188,7 @@ function ExerciseDetailModal({ ex, plans = [], onClose, onDelete }) {
       })()}
       <div className="grid grid-cols-2 gap-3 mb-4">
         <div className="bg-white rounded-lg p-3 border" style={{ borderColor: "#DAD7CC" }}>
-          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Prescription</div>
+          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Sets & Reps</div>
           <div className="text-sm font-bold mt-0.5" style={{ color: "#0E8388" }}>{ex.format}</div>
         </div>
         <div className="bg-white rounded-lg p-3 border" style={{ borderColor: "#DAD7CC" }}>
@@ -1201,66 +1196,6 @@ function ExerciseDetailModal({ ex, plans = [], onClose, onDelete }) {
           <div className="text-sm font-bold mt-0.5">{ex.equipment}</div>
         </div>
       </div>
-
-      {history.length > 0 && (
-        <div className="space-y-3 mb-4">
-          <div>
-            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5 flex items-center gap-1">
-              <TrendingUp size={12} /> Weight progression (top set)
-            </div>
-            <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
-              <ResponsiveContainer width="100%" height={120}>
-                <LineChart data={history}>
-                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
-                  <YAxis tick={{ fontSize: 9 }} width={26} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="topWeight" stroke="#0E8388" strokeWidth={2} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Volume over time</div>
-            <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
-              <ResponsiveContainer width="100%" height={120}>
-                <LineChart data={history}>
-                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
-                  <YAxis tick={{ fontSize: 9 }} width={30} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="volume" stroke="#3B5BA5" strokeWidth={2} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Estimated 1RM (Epley)</div>
-            <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
-              <ResponsiveContainer width="100%" height={120}>
-                <LineChart data={history}>
-                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
-                  <YAxis tick={{ fontSize: 9 }} width={30} />
-                  <Tooltip />
-                  <Line type="monotone" dataKey="e1rm" stroke="#E2984B" strokeWidth={2} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-          {prs.length > 0 && (
-            <div>
-              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Personal records</div>
-              <div className="space-y-1">
-                {prs.map((p, i) => (
-                  <div key={i} className="flex items-center gap-1.5 text-xs bg-white rounded-lg border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
-                    <Sparkles size={12} color="#E2984B" />
-                    <span className="font-semibold" style={{ color: "#12213A" }}>{p.label}</span>
-                    <span className="text-gray-400">— {p.topWeight}kg top set · {p.volume}kg volume</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {onDelete && (
         <button onClick={onDelete} className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-semibold" style={{ color: "#C1483B", border: "1px solid #C1483B33" }}>
@@ -2665,7 +2600,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [filter, setFilter] = useState(season);
@@ -2804,6 +2739,109 @@ function StatsTab({ matches, season, onSave, onDelete }) {
           onClose={() => setShowForm(false)}
           onSave={(m) => { onSave(m); setShowForm(false); setOpenMatchId(m.id); }}
         />
+      )}
+
+      <WorkoutStats plans={plans} exercises={exercises} />
+    </div>
+  );
+}
+
+function WorkoutStats({ plans, exercises }) {
+  const [openId, setOpenId] = useState(null);
+
+  const withHistory = exercises
+    .filter((ex) => ex.type === "Gym")
+    .map((ex) => ({ ex, history: exerciseLogHistory(plans, ex.id) }))
+    .filter(({ history }) => history.length > 0);
+
+  return (
+    <div className="mt-6">
+      <div className="text-lg font-black mb-3" style={{ color: "#12213A" }}>Workout stats</div>
+
+      {withHistory.length === 0 ? (
+        <div className="text-center py-8 bg-white rounded-lg border" style={{ borderColor: "#DAD7CC" }}>
+          <Dumbbell size={24} color="#DAD7CC" className="mx-auto mb-2" />
+          <div className="text-sm font-bold" style={{ color: "#12213A" }}>No gym sets logged yet</div>
+          <div className="text-xs text-gray-500 mt-1">Log sets on a gym exercise when completing a session to see progress here.</div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {withHistory.map(({ ex, history }) => {
+            const open = openId === ex.id;
+            const latest = history[history.length - 1];
+            const prs = history.filter((h) => h.isPr);
+            return (
+              <div key={ex.id} className="bg-white rounded-lg border overflow-hidden" style={{ borderColor: "#DAD7CC" }}>
+                <button onClick={() => setOpenId(open ? null : ex.id)} className="w-full p-3 text-left flex items-center justify-between">
+                  <div>
+                    <div className="font-bold text-sm" style={{ color: "#12213A" }}>{ex.name}</div>
+                    <div className="text-[11px] text-gray-500 mt-0.5">{latest.topWeight}kg top set · {history.length} session{history.length !== 1 ? "s" : ""} logged</div>
+                  </div>
+                  <ChevronDown size={16} className={open ? "rotate-180 transition-transform" : "transition-transform"} />
+                </button>
+                {open && (
+                  <div className="px-3 pb-3 space-y-3">
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5 flex items-center gap-1">
+                        <TrendingUp size={12} /> Weight progression (top set)
+                      </div>
+                      <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+                        <ResponsiveContainer width="100%" height={120}>
+                          <LineChart data={history}>
+                            <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
+                            <YAxis tick={{ fontSize: 9 }} width={26} />
+                            <Tooltip />
+                            <Line type="monotone" dataKey="topWeight" stroke="#0E8388" strokeWidth={2} dot={{ r: 3 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Volume over time</div>
+                      <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+                        <ResponsiveContainer width="100%" height={120}>
+                          <LineChart data={history}>
+                            <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
+                            <YAxis tick={{ fontSize: 9 }} width={30} />
+                            <Tooltip />
+                            <Line type="monotone" dataKey="volume" stroke="#3B5BA5" strokeWidth={2} dot={{ r: 3 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Estimated 1RM (Epley)</div>
+                      <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+                        <ResponsiveContainer width="100%" height={120}>
+                          <LineChart data={history}>
+                            <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
+                            <YAxis tick={{ fontSize: 9 }} width={30} />
+                            <Tooltip />
+                            <Line type="monotone" dataKey="e1rm" stroke="#E2984B" strokeWidth={2} dot={{ r: 3 }} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+                    {prs.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Personal records</div>
+                        <div className="space-y-1">
+                          {prs.map((p, i) => (
+                            <div key={i} className="flex items-center gap-1.5 text-xs bg-white rounded-lg border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+                              <Sparkles size={12} color="#E2984B" />
+                              <span className="font-semibold" style={{ color: "#12213A" }}>{p.label}</span>
+                              <span className="text-gray-400">— {p.topWeight}kg top set · {p.volume}kg volume</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
