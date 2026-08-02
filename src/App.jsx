@@ -10,6 +10,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "rec
 import { loadUserData, saveUserData } from "./lib/storage.js";
 import { supabase } from "./lib/supabaseClient.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
+import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
 
 /* ---------------------------------------------------------------- */
 /* Design tokens                                                     */
@@ -88,10 +89,18 @@ const DEFAULT_EXERCISES = [
   { id: "e47", name: "Directed Outlet Pass Drill", category: "Fast Break & Distribution", type: "Team", season: "Both", equipment: "Ball, 2+ players", format: "5 x 8", desc: "After each save, a coach or teammate signals which side to release the outlet pass to. Builds the habit of scanning for the break before the ball even arrives." },
   { id: "e48", name: "Ready Stance Fundamentals", category: "Positioning", type: "Solo", season: "Both", equipment: "Mirror (optional)", format: "5 x 30s holds", desc: "Set and hold the base ready stance: feet shoulder-width apart, knees bent, weight forward, hands up and slightly ahead with palms out and fingers spread, eyes on the ball carrier. A simple check-and-reset drill worth revisiting even at senior level." },
   { id: "e49", name: "Basic Catch Fundamentals", category: "Reflexes", type: "Partner", season: "Both", equipment: "Ball", format: "4 x 15", desc: "Partner tosses or rolls the ball straight at you from close range. Focus purely on clean hand positioning and secure control rather than power or placement — the foundation every other catching drill builds on. Increase toss speed only once catches are consistently clean." },
-  { id: "e50", name: "Pre-Session Activation Sequence", category: "Warm-Up", type: "Solo", season: "Both", equipment: "None", format: "5-7 min", desc: "A short raise-mobilise-activate sequence to run before any session or match: light aerobic raise (jogging, skipping), dynamic mobility through hips, ankles and shoulders, then activation for glutes and shoulder stabilisers. Not a stretching routine — the goal is to raise body temperature and switch muscles on, not lengthen them." },
-  { id: "e51", name: "Footwork & Reaction Priming", category: "Warm-Up", type: "Partner", season: "Both", equipment: "Ball (optional)", format: "6-8 min", desc: "Progressive footwork and reaction priming to run immediately before facing live shots: shuffles and split-steps building in intensity, then a handful of low-pressure reaction reps against a partner's throw. The aim is to have your feet and eyes switched on for the first real shot of the session, not have that shot be your first movement of the day." },
+  { id: "e50", name: "Warm-Up: General Physical Preparation", category: "Warm-Up", type: "Solo", season: "Both", equipment: "None", format: "4-5 min", desc: "Joint mobility through shoulders, elbows, hips, ankles and knees, moving from static holds into dynamic swings, then a few short bursts of GK-specific fast movement (quick feet, a couple of explosive steps) to raise heart rate. Phase 1 of 4 — general preparation before anything goal-specific starts." },
+  { id: "e51", name: "Warm-Up: Progressive Throws", category: "Warm-Up", type: "Partner", season: "Both", equipment: "Ball", format: "6-8 min", desc: "Start cued — your partner shows or tells you which corner is coming, so you groove clean technique and ball contact before anything is unpredictable. Once that feels sharp, move to realistic, unpredictable shot positions. Phase 3 of 4 — this is where warm-up starts asking the questions a real shot will." },
   { id: "e52", name: "Noise-Filter Reaction Drill", category: "Reflexes", type: "Partner", season: "Both", equipment: "Ball, plus a second person or noise source", format: "4 x 10", desc: "A standard reaction drill — partner throws, you save — with deliberate noise layered on top: a second person shouting numbers or contradictory calls, or crowd noise playing while you react to the real throw. Unlike cue-reading drills, which train you to pick up a signal, this trains you to filter out everything that isn't the signal — a distinct skill under real match noise." },
   { id: "e53", name: "Multi-Target Tracking Drill", category: "Positioning", type: "Team", season: "Both", equipment: "Ball, 3+ players", format: "5 x 6", desc: "Two or more attackers move and pass around the top of the D while you track all of them and adjust your position continuously, with a shot coming from whichever one is called when the coach signals. Unlike single-thrower drills, there's no one player to lock onto — the skill here is holding awareness of multiple moving threats and the space between them at once, not reading one release." },
+  { id: "e54", name: "Post-Touch Positional Awareness", category: "Positioning", type: "Solo", season: "Both", equipment: "None (blindfold optional)", format: "5 x 30s", desc: "Close your eyes, or wear a blindfold, and move around the goal area, touching each post by feel before returning to the centre. Builds an internal sense of exact position in goal without a visual check — the same re-orientation you need in the split second after a scramble or a dive, when there's no time to look." },
+  { id: "e55", name: "Auditory Reaction Drill", category: "Reflexes", type: "Team", season: "Both", equipment: "Ball, 2+ players", format: "5 x 8", desc: "Face away from play, or close your eyes, while teammates pass the ball, then shoot. React to the sound of the shot, not the sight of it. Sharpens the auditory cues — footstep timing, contact sound — that supplement vision during a real scramble, when your eyes genuinely can't be everywhere at once." },
+  { id: "e56", name: "Cover-the-Frame Drill", category: "Positioning", type: "Team", season: "Both", equipment: "Ball, 3+ shooters", format: "4 x 10 shots", desc: "Multiple shooters positioned around the 6m and 9m arc fire in quick succession with minimal reset time between shots. Instead of a clean reset-and-set for every shot, you're forced to cover the frame instinctively from wherever you land — closer to how a real scramble unfolds than a one-shot-at-a-time drill." },
+  { id: "e57", name: "Ball Absorption: Static Catch", category: "Core & Prevention", type: "Partner", season: "Both", equipment: "Ball", format: "4 x 10", desc: "Standing still, receive the ball with elbows bent and forearms angled forward to absorb the impact — not rigid, straight arms blocking it. Straight-arm blocking risks elbow hyperextension on a hard shot; this is the technique that avoids it. Tier 1 of 3: no movement yet, just the arm and hand mechanics." },
+  { id: "e58", name: "Ball Absorption: Lateral Step Catch", category: "Core & Prevention", type: "Partner", season: "Both", equipment: "Ball", format: "4 x 8 each side", desc: "Same bent-elbow absorption technique as the static version, now off a small lateral step to the ball rather than standing still. Tier 2 of 3 — only move on to this once the static catch feels automatic; adding movement too early tends to bring the rigid, straight-arm habit back." },
+  { id: "e59", name: "Ball Absorption: One-Handed Leaning Save", category: "Core & Prevention", type: "Partner", season: "Both", equipment: "Ball", format: "4 x 6 each side", desc: "Absorb a ball at distance with a single hand and arm, leaning into the save rather than reaching with a stiff, straight arm. Tier 3 of 3 — the same soft-absorption principle as the first two drills, applied at full extension, where the temptation to brace rigidly is strongest." },
+  { id: "e60", name: "Warm-Up: In-Goal Movement Preparation", category: "Warm-Up", type: "Solo", season: "Both", equipment: "None", format: "3-4 min", desc: "Move through the goal area at working pace: check your footing and surroundings, then run through your basic save positions and styles without facing a live shot yet. Phase 2 of 4 — getting comfortable moving in the space itself before anyone starts shooting at you." },
+  { id: "e61", name: "Warm-Up: Distribution Finish", category: "Warm-Up", type: "Partner", season: "Both", equipment: "Ball", format: "3-4 min", desc: "Finish the warm-up on distribution, not defending: receive a ball and release an accurate pass to a simulated counterattack run from the corner of the court. Phase 4 of 4 — ends the warm-up on the transition skill you'll actually need seconds after a save in a real match." },
 ];
 
 const GOALS = [
@@ -120,6 +129,10 @@ const ADVICE_TOPICS = [
       "Hands come up and slightly forward with palms open. Don't let them drop while your feet are still moving.",
       "Eyes stay on the shooter's body, not the ball, until the release.",
     ],
+    diagrams: [
+      { key: "angleNarrowing", caption: "Angle narrowing: stand where the bisector between the shooter and both posts meets your position, not on the centre line." },
+      { key: "shadowOfBlock", caption: "Don't stand in a defender's shadow — it blocks your sightline and your coverage just as much as it blocks the shooter's. Step clear of the line between the shooter and the block." },
+    ],
   },
   {
     id: "reading",
@@ -130,6 +143,10 @@ const ADVICE_TOPICS = [
       "Watch the shoulder and hip rotation, not the ball. The wind-up tells you the shot before the release does.",
       "Build a mental library of each shooter's tendencies as the match goes on, rather than resetting your read on every attack.",
       "Commit late enough that a wrong read still leaves you a chance to adjust — anticipation you can recover from beats anticipation you can't.",
+    ],
+    diagrams: [
+      { key: "wingShotGeometry", caption: "A wing shot at a small angle to the post needs you tight to it — there's barely any goal to cover on that side. A wider angle gives you room to step out." },
+      { key: "straightShotCorner", caption: "On a straight shot with a defender in the way, the ball goes to whichever corner its path passes on the way past the block — read the gap, not just the shooter." },
     ],
   },
   {
@@ -228,6 +245,12 @@ const ADVICE_TOPICS = [
 ];
 
 const ADVICE_ICONS = { Compass, Eye, ShieldCheck, Zap, Waves, Brain, Target, Flame, RotateCcw };
+const ADVICE_DIAGRAMS = {
+  angleNarrowing: AngleNarrowingDiagram,
+  shadowOfBlock: ShadowOfBlockDiagram,
+  wingShotGeometry: WingShotGeometryDiagram,
+  straightShotCorner: StraightShotCornerDiagram,
+};
 
 const LEVELS = ["Social", "Club", "State", "National", "International"];
 const DISCIPLINES = ["Indoor", "Beach", "Both"];
@@ -1985,14 +2008,30 @@ function AdviceHub() {
                 <ChevronDown size={16} className={open ? "rotate-180 transition-transform shrink-0" : "transition-transform shrink-0"} />
               </button>
               {open && (
-                <ul className="px-3 pb-3 space-y-2">
-                  {t.tips.map((tip, i) => (
-                    <li key={i} className="flex gap-2 text-sm text-gray-700 leading-snug">
-                      <span className="mt-1.5 w-1 h-1 rounded-full shrink-0" style={{ background: "#0E8388" }} />
-                      {tip}
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className="px-3 pb-3 space-y-2">
+                    {t.tips.map((tip, i) => (
+                      <li key={i} className="flex gap-2 text-sm text-gray-700 leading-snug">
+                        <span className="mt-1.5 w-1 h-1 rounded-full shrink-0" style={{ background: "#0E8388" }} />
+                        {tip}
+                      </li>
+                    ))}
+                  </ul>
+                  {t.diagrams && t.diagrams.length > 0 && (
+                    <div className="px-3 pb-3 space-y-3">
+                      {t.diagrams.map((d) => {
+                        const Diagram = ADVICE_DIAGRAMS[d.key];
+                        if (!Diagram) return null;
+                        return (
+                          <div key={d.key} className="rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+                            <Diagram />
+                            <p className="text-[11px] text-gray-500 text-center mt-2">{d.caption}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           );
