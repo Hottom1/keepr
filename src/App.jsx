@@ -408,7 +408,7 @@ function zoneColor(z) {
   return "#C1483B";
 }
 
-function buildKipSystemPrompt(profile, plans, season, matches) {
+function buildKipSystemPrompt(profile, plans, season, matches, exercises = []) {
   const activePlan = [...plans].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
   const recentLogs = [];
   plans.forEach((p) => {
@@ -454,6 +454,30 @@ function buildKipSystemPrompt(profile, plans, season, matches) {
       const savePct = Math.round((agg.totalSaves / (agg.totalSaves + agg.totalGoals)) * 100);
       return `Season save rate: ${savePct}% across ${agg.totalSaves + agg.totalGoals} shots logged. Weakest zone: ${ZONE_LABELS[weakest[0]]} (${weakest[1].saves}/${weakest[1].saves + weakest[1].goals} saved).`;
     })(),
+    "",
+    "GYM TRAINING LOG:",
+    (() => {
+      const gymExerciseIds = new Set();
+      plans.forEach((p) => p.weeks.forEach((w) => w.sessions.forEach((s) => {
+        if (!s.completed) return;
+        (s.exercises || []).forEach((entry) => {
+          if (entry.loggedSets && entry.loggedSets.length > 0) gymExerciseIds.add(entry.exerciseId);
+        });
+      })));
+      const summaries = [...gymExerciseIds].map((id) => {
+        const ex = exercises.find((e) => e.id === id);
+        const history = exerciseLogHistory(plans, id);
+        if (!ex || history.length === 0) return null;
+        const first = history[0];
+        const latest = history[history.length - 1];
+        const trend = history.length > 1
+          ? latest.topWeight > first.topWeight ? "trending up" : latest.topWeight < first.topWeight ? "trending down" : "holding steady"
+          : "first session logged";
+        const prCount = history.filter((h) => h.isPr).length;
+        return `${ex.name}: ${history.length} session${history.length !== 1 ? "s" : ""} logged, latest top set ${latest.topWeight}kg (est. 1RM ${latest.e1rm}kg), ${trend}${prCount ? `, ${prCount} PR${prCount !== 1 ? "s" : ""} hit` : ""}.`;
+      }).filter(Boolean);
+      return summaries.length ? summaries.join("\n") : "No gym sets logged yet.";
+    })(),
   ];
   return lines.join("\n");
 }
@@ -481,7 +505,7 @@ function generateGoalBlock(name, season, goalId, exercises) {
       const exs = Array.from({ length: phase.perSession }).map(() => {
         const ex = pool[cursor % pool.length];
         cursor += 1;
-        return { entryId: uid(), exerciseId: ex.id, prescription: ex.format };
+        return { entryId: uid(), exerciseId: ex.id, ...makeReps(ex.format) };
       });
       return { sessionId: uid(), sessionNumber: sIdx + 1, exercises: exs, completed: false, focus: "" };
     });
@@ -591,6 +615,105 @@ function nextSuggestedSession(plans) {
     });
   });
   return best;
+}
+
+/* ---------------------------------------------------------------- */
+/* Reps / gym logging                                                */
+/* Session-exercise entries used to carry a single free-text          */
+/* `prescription` string (e.g. "4 x 6 each side"). New entries now    */
+/* carry that same text as `repsRaw` (always the source of truth for  */
+/* display, so a parser quirk never corrupts what's shown) plus       */
+/* best-effort structured fields derived from it for charts/logging.  */
+/* ---------------------------------------------------------------- */
+
+function parseRepsFromFormat(format) {
+  if (!format) return { sets: null, value: null, unit: null, note: null };
+  const m = format.match(/^(\d+)\s*x\s*(\d+)\s*(seconds|secs|sec|minutes|mins|min|metres|meters|reps?|s|m)?\s*(.*)$/i);
+  if (m) {
+    const sets = parseInt(m[1], 10);
+    const value = parseInt(m[2], 10);
+    const token = (m[3] || "").toLowerCase();
+    let unit = "reps";
+    if (token.startsWith("s")) unit = "seconds";
+    else if (token.startsWith("min")) unit = "minutes";
+    else if (token.startsWith("m")) unit = "metres";
+    const note = (m[4] || "").trim() || null;
+    return { sets, value, unit, note };
+  }
+  const m2 = format.match(/^(\d+)\s*(reps?|shots?|throws?)\s*(.*)$/i);
+  if (m2) {
+    return { sets: 1, value: parseInt(m2[1], 10), unit: "reps", note: (m2[3] || "").trim() || null };
+  }
+  return { sets: null, value: null, unit: null, note: null };
+}
+
+function makeReps(format) {
+  const parsed = parseRepsFromFormat(format);
+  return {
+    repsRaw: format || "",
+    repsSets: parsed.sets,
+    repsValue: parsed.value,
+    repsUnit: parsed.unit,
+    repsNote: parsed.note,
+    repsWeight: null,
+    weightUnit: null,
+  };
+}
+
+// Reads either shape — new repsRaw, or the old `prescription` string on
+// session-exercise entries saved before this field existed.
+function repsDisplay(entry) {
+  return entry.repsRaw ?? entry.prescription ?? "";
+}
+
+function epley1RM(weight, reps) {
+  return (weight || 0) * (1 + (reps || 0) / 30);
+}
+
+// History for one exercise's logged gym sets, across every completed
+// session in every plan — same flatten-then-sort shape as rpeTrend.
+function exerciseLogHistory(plans, exerciseId) {
+  const points = [];
+  plans.forEach((p) => {
+    p.weeks.forEach((w) => {
+      w.sessions.forEach((s) => {
+        if (!s.completed || !s.completedAt) return;
+        const entry = (s.exercises || []).find((e) => e.exerciseId === exerciseId && e.loggedSets && e.loggedSets.length > 0);
+        if (!entry) return;
+        points.push({ date: s.completedAt, sets: entry.loggedSets });
+      });
+    });
+  });
+  points.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  let bestWeightEver = 0, bestVolumeEver = 0;
+  const bestRepsAtWeight = {};
+
+  return points.map(({ date, sets }) => {
+    const topWeight = Math.max(0, ...sets.map((x) => x.weight || 0));
+    const volume = sets.reduce((a, x) => a + (x.reps || 0) * (x.weight || 0), 0);
+    const e1rm = Math.max(0, ...sets.map((x) => epley1RM(x.weight, x.reps)));
+
+    let isPr = topWeight > bestWeightEver || volume > bestVolumeEver;
+    sets.forEach((x) => {
+      if (x.weight && (x.reps || 0) > (bestRepsAtWeight[x.weight] || 0)) isPr = true;
+    });
+
+    bestWeightEver = Math.max(bestWeightEver, topWeight);
+    bestVolumeEver = Math.max(bestVolumeEver, volume);
+    sets.forEach((x) => {
+      if (x.weight) bestRepsAtWeight[x.weight] = Math.max(bestRepsAtWeight[x.weight] || 0, x.reps || 0);
+    });
+
+    return {
+      date,
+      label: new Date(date).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+      topWeight,
+      volume,
+      e1rm: Math.round(e1rm * 10) / 10,
+      isPr,
+    };
+  });
 }
 
 /* ---------------------------------------------------------------- */
@@ -757,6 +880,7 @@ export default function GKTrainerApp() {
           <Library
             exercises={allExercises}
             season={season}
+            plans={plans}
             onAdd={addExercise}
             onDelete={deleteExercise}
           />
@@ -792,6 +916,7 @@ export default function GKTrainerApp() {
             plans={plans}
             season={season}
             matches={matches}
+            exercises={allExercises}
           />
         )}
       </div>
@@ -890,7 +1015,7 @@ function BottomNav({ tab, setTab }) {
 /* Library                                                            */
 /* ---------------------------------------------------------------- */
 
-function Library({ exercises, season, onAdd, onDelete }) {
+function Library({ exercises, season, plans, onAdd, onDelete }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState(null);
   const [type, setType] = useState(null);
@@ -964,6 +1089,7 @@ function Library({ exercises, season, onAdd, onDelete }) {
       {detail && (
         <ExerciseDetailModal
           ex={detail}
+          plans={plans}
           onClose={() => setDetail(null)}
           onDelete={
             detail.custom
@@ -1007,7 +1133,10 @@ function ExerciseRow({ ex, onClick }) {
   );
 }
 
-function ExerciseDetailModal({ ex, onClose, onDelete }) {
+function ExerciseDetailModal({ ex, plans = [], onClose, onDelete }) {
+  const history = ex.type === "Gym" ? exerciseLogHistory(plans, ex.id) : [];
+  const prs = history.filter((h) => h.isPr);
+
   return (
     <Modal onClose={onClose}>
       <div className="flex items-start justify-between mb-1">
@@ -1029,6 +1158,67 @@ function ExerciseDetailModal({ ex, onClose, onDelete }) {
           <div className="text-sm font-bold mt-0.5">{ex.equipment}</div>
         </div>
       </div>
+
+      {history.length > 0 && (
+        <div className="space-y-3 mb-4">
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5 flex items-center gap-1">
+              <TrendingUp size={12} /> Weight progression (top set)
+            </div>
+            <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+              <ResponsiveContainer width="100%" height={120}>
+                <LineChart data={history}>
+                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
+                  <YAxis tick={{ fontSize: 9 }} width={26} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="topWeight" stroke="#0E8388" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Volume over time</div>
+            <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+              <ResponsiveContainer width="100%" height={120}>
+                <LineChart data={history}>
+                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
+                  <YAxis tick={{ fontSize: 9 }} width={30} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="volume" stroke="#3B5BA5" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Estimated 1RM (Epley)</div>
+            <div className="bg-white rounded-lg border p-2" style={{ borderColor: "#DAD7CC" }}>
+              <ResponsiveContainer width="100%" height={120}>
+                <LineChart data={history}>
+                  <XAxis dataKey="label" tick={{ fontSize: 9 }} interval={0} angle={-20} textAnchor="end" height={30} />
+                  <YAxis tick={{ fontSize: 9 }} width={30} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="e1rm" stroke="#E2984B" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          {prs.length > 0 && (
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Personal records</div>
+              <div className="space-y-1">
+                {prs.map((p, i) => (
+                  <div key={i} className="flex items-center gap-1.5 text-xs bg-white rounded-lg border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+                    <Sparkles size={12} color="#E2984B" />
+                    <span className="font-semibold" style={{ color: "#12213A" }}>{p.label}</span>
+                    <span className="text-gray-400">— {p.topWeight}kg top set · {p.volume}kg volume</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {onDelete && (
         <button onClick={onDelete} className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-semibold" style={{ color: "#C1483B", border: "1px solid #C1483B33" }}>
           <Trash2 size={14} /> Remove from library
@@ -1256,7 +1446,7 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
   function addExerciseToSession(weekIdx, sessionIdx, ex) {
     updateSession(weekIdx, sessionIdx, (s) => ({
       ...s,
-      exercises: [...s.exercises, { entryId: uid(), exerciseId: ex.id, prescription: ex.format }],
+      exercises: [...s.exercises, { entryId: uid(), exerciseId: ex.id, ...makeReps(ex.format) }],
     }));
     setPicker(null);
   }
@@ -1265,10 +1455,10 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
     updateSession(weekIdx, sessionIdx, (s) => ({ ...s, exercises: s.exercises.filter((e) => e.entryId !== entryId) }));
   }
 
-  function setPrescription(weekIdx, sessionIdx, entryId, val) {
+  function setReps(weekIdx, sessionIdx, entryId, val) {
     updateSession(weekIdx, sessionIdx, (s) => ({
       ...s,
-      exercises: s.exercises.map((e) => (e.entryId === entryId ? { ...e, prescription: val } : e)),
+      exercises: s.exercises.map((e) => (e.entryId === entryId ? { ...e, repsRaw: val } : e)),
     }));
   }
 
@@ -1328,8 +1518,8 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
                             <div className="flex-1 min-w-0">
                               <div className="text-xs font-semibold truncate">{ex.name}</div>
                               <input
-                                value={entry.prescription}
-                                onChange={(e) => setPrescription(wi, si, entry.entryId, e.target.value)}
+                                value={repsDisplay(entry)}
+                                onChange={(e) => setReps(wi, si, entry.entryId, e.target.value)}
                                 className="text-[11px] text-gray-500 bg-transparent outline-none w-full"
                               />
                             </div>
@@ -1577,7 +1767,12 @@ function Plans({ plans, exercises, onSave, onDelete }) {
                               if (!ex) return null;
                               return (
                                 <div key={entry.entryId} className="text-[11px] text-gray-600">
-                                  {ex.name} <span className="text-gray-400">— {entry.prescription}</span>
+                                  {ex.name} <span className="text-gray-400">— {repsDisplay(entry)}</span>
+                                  {entry.loggedSets && entry.loggedSets.length > 0 && (
+                                    <div className="text-[10px] text-gray-400 pl-2">
+                                      Logged: {entry.loggedSets.map((set, i) => `${set.weight ?? "–"}kg×${set.reps ?? "–"}`).join(", ")}
+                                    </div>
+                                  )}
                                 </div>
                               );
                             })}
@@ -1613,30 +1808,115 @@ function Plans({ plans, exercises, onSave, onDelete }) {
         </Modal>
       )}
 
-      {logTarget && (
-        <LogSessionModal
-          focus={logTarget.focus}
-          onClose={() => setLogTarget(null)}
-          onSave={({ rpe, note }) => {
-            const { plan, weekId, sessionId } = logTarget;
-            const next = {
-              ...plan,
-              weeks: plan.weeks.map((ww) => ww.weekId === weekId
-                ? { ...ww, sessions: ww.sessions.map((ss) => ss.sessionId === sessionId ? { ...ss, completed: true, rpe, note, completedAt: new Date().toISOString() } : ss) }
-                : ww),
-            };
-            onSave(next);
-            setLogTarget(null);
-          }}
-        />
-      )}
+      {logTarget && (() => {
+        const logWeek = logTarget.plan.weeks.find((ww) => ww.weekId === logTarget.weekId);
+        const logSession = logWeek?.sessions.find((ss) => ss.sessionId === logTarget.sessionId);
+        const gymEntries = (logSession?.exercises || [])
+          .map((entry) => ({ entry, ex: exercises.find((e) => e.id === entry.exerciseId) }))
+          .filter(({ ex }) => ex && ex.type === "Gym")
+          .map(({ entry, ex }) => ({ entryId: entry.entryId, exerciseName: ex.name }));
+        return (
+          <LogSessionModal
+            focus={logTarget.focus}
+            gymEntries={gymEntries}
+            onClose={() => setLogTarget(null)}
+            onSave={({ rpe, note, gymLogs }) => {
+              const { plan, weekId, sessionId } = logTarget;
+              const next = {
+                ...plan,
+                weeks: plan.weeks.map((ww) => ww.weekId === weekId
+                  ? { ...ww, sessions: ww.sessions.map((ss) => {
+                      if (ss.sessionId !== sessionId) return ss;
+                      const exercises = ss.exercises.map((entry) =>
+                        gymLogs && gymLogs[entry.entryId] ? { ...entry, loggedSets: gymLogs[entry.entryId] } : entry
+                      );
+                      return { ...ss, completed: true, rpe, note, completedAt: new Date().toISOString(), exercises };
+                    }) }
+                  : ww),
+              };
+              onSave(next);
+              setLogTarget(null);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }
 
-function LogSessionModal({ onClose, onSave, focus }) {
+// Strong/Hevy-style add-set flow for one gym exercise: reps + weight(kg)
+// per set. Only rendered for entries whose exercise is type === "Gym".
+function GymSetLogger({ exerciseName, sets, onChange }) {
+  function updateSet(i, patch) {
+    onChange(sets.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
+  }
+  function removeSet(i) {
+    onChange(sets.filter((_, idx) => idx !== i));
+  }
+  function addSet() {
+    const last = sets[sets.length - 1];
+    onChange([...sets, { reps: last?.reps ?? null, weight: last?.weight ?? null }]);
+  }
+  return (
+    <div className="mb-2.5 p-2.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}>
+      <div className="text-xs font-bold mb-2 flex items-center gap-1.5" style={{ color: "#12213A" }}>
+        <Dumbbell size={13} color="#0E8388" /> {exerciseName}
+      </div>
+      {sets.length > 0 && (
+        <div className="grid grid-cols-[20px_1fr_1fr_24px] gap-1.5 mb-1 text-[10px] font-bold uppercase tracking-wide text-gray-400 px-0.5">
+          <div>Set</div><div>Weight (kg)</div><div>Reps</div><div></div>
+        </div>
+      )}
+      <div className="space-y-1.5 mb-2">
+        {sets.map((set, i) => (
+          <div key={i} className="grid grid-cols-[20px_1fr_1fr_24px] gap-1.5 items-center">
+            <div className="text-xs font-bold text-gray-400 text-center">{i + 1}</div>
+            <input
+              type="number"
+              inputMode="decimal"
+              value={set.weight ?? ""}
+              onChange={(e) => updateSet(i, { weight: e.target.value === "" ? null : Number(e.target.value) })}
+              placeholder="0"
+              className="input py-1.5 text-sm text-center"
+            />
+            <input
+              type="number"
+              inputMode="numeric"
+              value={set.reps ?? ""}
+              onChange={(e) => updateSet(i, { reps: e.target.value === "" ? null : Number(e.target.value) })}
+              placeholder="0"
+              className="input py-1.5 text-sm text-center"
+            />
+            <button onClick={() => removeSet(i)} className="p-1 text-gray-300">
+              <X size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={addSet}
+        className="w-full py-1.5 rounded-lg text-xs font-bold border flex items-center justify-center gap-1"
+        style={{ borderColor: "#0E8388", color: "#0E8388" }}
+      >
+        <Plus size={12} /> Add set
+      </button>
+    </div>
+  );
+}
+
+function LogSessionModal({ onClose, onSave, focus, gymEntries = [] }) {
   const [rpe, setRpe] = useState(null);
   const [note, setNote] = useState("");
+  const [gymLogs, setGymLogs] = useState(() => Object.fromEntries(gymEntries.map((g) => [g.entryId, []])));
+
+  function cleanedGymLogs() {
+    return Object.fromEntries(
+      Object.entries(gymLogs)
+        .map(([id, sets]) => [id, sets.filter((s) => s.reps != null || s.weight != null)])
+        .filter(([, sets]) => sets.length > 0)
+    );
+  }
+
   return (
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Log this session</h3>
@@ -1645,6 +1925,19 @@ function LogSessionModal({ onClose, onSave, focus }) {
         <div className="mb-3 p-2.5 rounded-lg text-xs" style={{ background: "#F3F2ED" }}>
           <span className="block text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-0.5">Your focus was</span>
           <span style={{ color: "#12213A" }}>"{focus}"</span>
+        </div>
+      )}
+      {gymEntries.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Log your sets</div>
+          {gymEntries.map((g) => (
+            <GymSetLogger
+              key={g.entryId}
+              exerciseName={g.exerciseName}
+              sets={gymLogs[g.entryId] || []}
+              onChange={(sets) => setGymLogs((prev) => ({ ...prev, [g.entryId]: sets }))}
+            />
+          ))}
         </div>
       )}
       <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">RPE (effort, 1–10)</div>
@@ -1661,8 +1954,8 @@ function LogSessionModal({ onClose, onSave, focus }) {
       <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Notes</div>
       <textarea className="input mb-4" rows={3} placeholder="How did it feel? Anything sore, anything clicked?" value={note} onChange={(e) => setNote(e.target.value)} />
       <div className="flex gap-2">
-        <button onClick={() => onSave({ rpe: null, note: "" })} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Skip</button>
-        <button onClick={() => onSave({ rpe, note })} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-1.5" style={{ background: "#0E8388" }}>
+        <button onClick={() => onSave({ rpe: null, note: "", gymLogs: {} })} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Skip</button>
+        <button onClick={() => onSave({ rpe, note, gymLogs: cleanedGymLogs() })} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-1.5" style={{ background: "#0E8388" }}>
           <Check size={14} /> Mark complete
         </button>
       </div>
@@ -1675,7 +1968,7 @@ function LogSessionModal({ onClose, onSave, focus }) {
 /* Kip                                                                */
 /* ---------------------------------------------------------------- */
 
-function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches }) {
+function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises }) {
   const [editing, setEditing] = useState(!profile.onboarded);
 
   if (editing) {
@@ -1696,6 +1989,7 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
       plans={plans}
       season={season}
       matches={matches}
+      exercises={exercises}
       onEditProfile={() => setEditing(true)}
     />
   );
@@ -1861,7 +2155,7 @@ function KipOnboarding({ profile, onSave, onCancel }) {
   );
 }
 
-function KipChat({ profile, messages, onSaveMessages, plans, season, matches, onEditProfile }) {
+function KipChat({ profile, messages, onSaveMessages, plans, season, matches, exercises, onEditProfile }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
@@ -1881,7 +2175,7 @@ function KipChat({ profile, messages, onSaveMessages, plans, season, matches, on
     setSending(true);
     setError(null);
     try {
-      const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches);
+      const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises);
       const { data: { session } } = await supabase.auth.getSession();
       const response = await fetch("/.netlify/functions/kip-chat", {
         method: "POST",
