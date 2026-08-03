@@ -348,14 +348,20 @@ function aggregateShotTypeStats(matches) {
   return map;
 }
 
+// Shared key for anything grouped by opponent name — matches, opponent
+// records, and the roster below all key off this exact normalization so a
+// team is recognized as "the same opponent" regardless of casing/whitespace.
+function normalizeOpponentName(name) {
+  return (name || "").trim().toLowerCase();
+}
+
 // Best-effort record: only counts matches whose free-text "result" field ends in a
 // standalone W/L/D (the form's own placeholder convention, e.g. "24-19 W"). Matches that
 // don't parse still count toward the match total and save% below, just not the record.
 function opponentRecord(matches, opponentName, excludeId) {
-  const norm = (s) => (s || "").trim().toLowerCase();
-  const target = norm(opponentName);
+  const target = normalizeOpponentName(opponentName);
   if (!target) return null;
-  const prior = matches.filter((m) => m.id !== excludeId && norm(m.opponent) === target);
+  const prior = matches.filter((m) => m.id !== excludeId && normalizeOpponentName(m.opponent) === target);
   if (prior.length === 0) return null;
   let wins = 0, losses = 0, draws = 0, saves = 0, shots = 0;
   prior.forEach((m) => {
@@ -375,6 +381,63 @@ function opponentRecord(matches, opponentName, excludeId) {
     savePct: shots > 0 ? Math.round((saves / shots) * 100) : null,
     shots,
   };
+}
+
+// The roster lives at the opponent-team level, not per-match — one shared
+// list of {number, name} shooters reused across every match against that
+// team, keyed by the same normalized name as opponentRecord.
+function findOpponentRoster(opponents, opponentName) {
+  const key = normalizeOpponentName(opponentName);
+  if (!key) return null;
+  return (opponents || []).find((o) => o.key === key) || null;
+}
+
+function upsertOpponentRoster(opponents, opponentName, roster) {
+  const key = normalizeOpponentName(opponentName);
+  const name = (opponentName || "").trim();
+  const exists = (opponents || []).some((o) => o.key === key);
+  return exists
+    ? opponents.map((o) => (o.key === key ? { ...o, name, roster } : o))
+    : [...(opponents || []), { key, name, roster }];
+}
+
+// Per-shooter save%/goals across every match vs this opponent, matched by
+// shot.shooterNumber against the roster's jersey number. Returns [] until
+// shots actually carry shooterNumber (wired in a later pass) — harmless,
+// since every caller already handles an empty breakdown.
+function shooterStats(matches, opponentName, roster) {
+  const target = normalizeOpponentName(opponentName);
+  const byNumber = {};
+  (matches || []).filter((m) => normalizeOpponentName(m.opponent) === target).forEach((m) => {
+    (m.shots || []).forEach((s) => {
+      if (s.shooterNumber == null) return;
+      const key = String(s.shooterNumber);
+      if (!byNumber[key]) byNumber[key] = { saves: 0, goals: 0 };
+      if (s.outcome === "Save") byNumber[key].saves++;
+      else byNumber[key].goals++;
+    });
+  });
+  return Object.entries(byNumber)
+    .map(([number, v]) => {
+      const total = v.saves + v.goals;
+      const rosterEntry = (roster || []).find((r) => String(r.number) === number);
+      return {
+        number,
+        name: rosterEntry?.name || null,
+        saves: v.saves,
+        goals: v.goals,
+        total,
+        savePct: total > 0 ? Math.round((v.saves / total) * 100) : null,
+      };
+    })
+    .sort((a, b) => b.goals - a.goals);
+}
+
+// Highest-scoring shooter on record, for the "heads up" note surfaced when
+// setting up a match against a team faced before.
+function mostDangerousShooter(matches, opponentName, roster) {
+  const stats = shooterStats(matches, opponentName, roster).filter((s) => s.goals > 0);
+  return stats.length ? stats[0] : null;
 }
 
 // mm:ss or h:mm:ss free text (matches whatever convention the keeper's video platform uses).
@@ -409,7 +472,7 @@ function zoneColor(z) {
   return "#C1483B";
 }
 
-function buildKipSystemPrompt(profile, plans, season, matches, exercises = []) {
+function buildKipSystemPrompt(profile, plans, season, matches, exercises = [], adHocSessions = []) {
   const activePlan = [...plans].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
   const recentLogs = [];
   plans.forEach((p) => {
@@ -464,9 +527,9 @@ function buildKipSystemPrompt(profile, plans, season, matches, exercises = []) {
     "",
     "GYM TRAINING LOG:",
     (() => {
-      const summaries = [...loggedGymExerciseIds(plans)].map((id) => {
+      const summaries = [...loggedGymExerciseIds(plans, adHocSessions)].map((id) => {
         const ex = exercises.find((e) => e.id === id);
-        const history = exerciseLogHistory(plans, id);
+        const history = exerciseLogHistory(plans, id, adHocSessions);
         if (!ex || history.length === 0) return null;
         const first = history[0];
         const latest = history[history.length - 1];
@@ -700,7 +763,7 @@ function exerciseGenWeight(ex, ctx) {
   }
 
   if (ex.type === "Gym") {
-    const hist = exerciseLogHistory(ctx.plans, ex.id);
+    const hist = exerciseLogHistory(ctx.plans, ex.id, ctx.adHocSessions);
     if (isPlateaued(hist)) {
       weight *= 1.3;
       reason = reason || `Kept in rotation — your top set here has been flat the last ${hist.length} sessions. Push for more weight.`;
@@ -740,15 +803,16 @@ function generateGoalBlock(name, season, goalId, exercises, dataContext = null) 
   if (dataContext && dataContext.useData) {
     const plans = dataContext.plans || [];
     const matches = dataContext.matches || [];
+    const adHocSessions = dataContext.adHocSessions || [];
     const niggleExcluded = excludedExerciseIdsForNiggles(exercises, dataContext.profile?.niggles);
     const zoneSignal = weakestZoneSignal(matches, season);
     const shotTypeSignal = weakestShotTypeSignal(matches, season);
     const trainingSignal = categoryTrainingSignal(plans, season, exercises);
-    const anyPlateaued = pool.some((ex) => ex.type === "Gym" && isPlateaued(exerciseLogHistory(plans, ex.id)));
+    const anyPlateaued = pool.some((ex) => ex.type === "Gym" && isPlateaued(exerciseLogHistory(plans, ex.id, adHocSessions)));
     const hasSignal = niggleExcluded.size > 0 || zoneSignal || shotTypeSignal || trainingSignal || anyPlateaued;
     if (hasSignal) {
       excludedIds = niggleExcluded;
-      ctx = { zoneSignal, shotTypeSignal, trainingSignal, plans };
+      ctx = { zoneSignal, shotTypeSignal, trainingSignal, plans, adHocSessions };
     }
   }
 
@@ -846,6 +910,78 @@ function weekStartKey(dateLike) {
 function formatShortDate(dateStr) {
   if (!dateStr) return "";
   return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/* ---------------------------------------------------------------- */
+/* Live recording                                                     */
+/* A `recording` sub-object lives directly on the plan session,        */
+/* ad-hoc session, or match it belongs to — the same object, not a     */
+/* parallel one — and persists through the app's normal save path on   */
+/* every action. That's the whole mechanism for surviving the app      */
+/* being closed or backgrounded mid-recording: there's nothing held    */
+/* only in memory, so reopening later just finds the same in-progress  */
+/* record and can resume it. Elapsed time is computed from real        */
+/* wall-clock timestamps (startedAt / pausedAt), not a running counter,*/
+/* so it's correct immediately on resume regardless of how long the    */
+/* tab was suspended.                                                  */
+/* ---------------------------------------------------------------- */
+
+function startRecording() {
+  return { startedAt: new Date().toISOString(), pausedAt: null, totalPausedMs: 0 };
+}
+
+function pauseRecording(recording) {
+  if (!recording || recording.pausedAt) return recording;
+  return { ...recording, pausedAt: new Date().toISOString() };
+}
+
+function resumeRecording(recording) {
+  if (!recording || !recording.pausedAt) return recording;
+  const pausedMs = Date.now() - new Date(recording.pausedAt).getTime();
+  return { ...recording, pausedAt: null, totalPausedMs: (recording.totalPausedMs || 0) + pausedMs };
+}
+
+function recordingElapsedMs(recording, now = Date.now()) {
+  if (!recording) return 0;
+  const end = recording.pausedAt ? new Date(recording.pausedAt).getTime() : now;
+  return Math.max(0, end - new Date(recording.startedAt).getTime() - (recording.totalPausedMs || 0));
+}
+
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+// Minutes, rounded, for auto-filling a duration field from a finished recording.
+function recordingElapsedMinutes(recording) {
+  return Math.round(recordingElapsedMs(recording) / 60000);
+}
+
+// Scans freshly-loaded data (not React state, which wouldn't be updated yet)
+// for any plan session, ad-hoc session, or match left with an unfinished
+// `recording` — e.g. the app was closed mid-recording. Used once on app load
+// to jump straight back into the live recorder instead of defaulting to Library.
+function findActiveRecording({ plans, adHocSessions, matches }) {
+  for (const plan of plans || []) {
+    for (const week of plan.weeks || []) {
+      for (const session of week.sessions || []) {
+        if (session.recording) {
+          return { kind: "plan", planId: plan.id, weekId: week.weekId, sessionId: session.sessionId, focus: session.focus };
+        }
+      }
+    }
+  }
+  for (const s of adHocSessions || []) {
+    if (s.recording) return { kind: "adhoc", sessionId: s.id };
+  }
+  for (const m of matches || []) {
+    if (m.recording) return { kind: "match", matchId: m.id };
+  }
+  return null;
 }
 
 // YYYY-MM-DD, matching the plain <input type="date"> convention used
@@ -974,7 +1110,7 @@ function parseExerciseDesc(desc) {
 
 // History for one exercise's logged gym sets, across every completed
 // session in every plan — same flatten-then-sort shape as rpeTrend.
-function exerciseLogHistory(plans, exerciseId) {
+function exerciseLogHistory(plans, exerciseId, adHocSessions = []) {
   const points = [];
   plans.forEach((p) => {
     p.weeks.forEach((w) => {
@@ -985,6 +1121,11 @@ function exerciseLogHistory(plans, exerciseId) {
         points.push({ date: s.completedAt, sets: entry.loggedSets });
       });
     });
+  });
+  (adHocSessions || []).forEach((s) => {
+    if (!s.completed || !s.completedAt) return;
+    const sets = (s.exerciseLogs || {})[exerciseId];
+    if (sets && sets.length > 0) points.push({ date: s.completedAt, sets });
   });
   points.sort((a, b) => new Date(a.date) - new Date(b.date));
 
@@ -1031,7 +1172,7 @@ const SESSION_POINTS = 10;
 const MATCH_POINTS = 15;
 const PR_POINTS = 25;
 
-function loggedGymExerciseIds(plans) {
+function loggedGymExerciseIds(plans, adHocSessions = []) {
   const ids = new Set();
   plans.forEach((p) => p.weeks.forEach((w) => w.sessions.forEach((s) => {
     if (!s.completed) return;
@@ -1039,13 +1180,19 @@ function loggedGymExerciseIds(plans) {
       if (entry.loggedSets && entry.loggedSets.length > 0) ids.add(entry.exerciseId);
     });
   })));
+  (adHocSessions || []).forEach((s) => {
+    if (!s.completed) return;
+    Object.entries(s.exerciseLogs || {}).forEach(([exerciseId, sets]) => {
+      if (sets && sets.length > 0) ids.add(exerciseId);
+    });
+  });
   return ids;
 }
 
-function totalPrCount(plans) {
+function totalPrCount(plans, adHocSessions = []) {
   let count = 0;
-  loggedGymExerciseIds(plans).forEach((id) => {
-    count += exerciseLogHistory(plans, id).filter((h) => h.isPr).length;
+  loggedGymExerciseIds(plans, adHocSessions).forEach((id) => {
+    count += exerciseLogHistory(plans, id, adHocSessions).filter((h) => h.isPr).length;
   });
   return count;
 }
@@ -1055,7 +1202,7 @@ function computeTotalPoints(plans, adHocSessions, matches) {
   const adHocDone = (adHocSessions || []).filter((s) => s.completed).length;
   const sessionsCompleted = planSessionsDone + adHocDone;
   const matchesLogged = (matches || []).length;
-  const prsHit = totalPrCount(plans);
+  const prsHit = totalPrCount(plans, adHocSessions);
   return {
     total: sessionsCompleted * SESSION_POINTS + matchesLogged * MATCH_POINTS + prsHit * PR_POINTS,
     sessionsCompleted,
@@ -1237,10 +1384,10 @@ function niggleQuietSignals(profile) {
   return signals;
 }
 
-function newPrSignals(plans, exercises) {
+function newPrSignals(plans, exercises, adHocSessions = []) {
   const signals = [];
-  loggedGymExerciseIds(plans).forEach((id) => {
-    const history = exerciseLogHistory(plans, id);
+  loggedGymExerciseIds(plans, adHocSessions).forEach((id) => {
+    const history = exerciseLogHistory(plans, id, adHocSessions);
     const last = history[history.length - 1];
     if (last && last.isPr) {
       const ex = exercises.find((e) => e.id === id);
@@ -1273,8 +1420,8 @@ function computeKipAlerts({ profile, plans, adHocSessions, matches, season, exer
   const rpeHigh = rpeHighSignal(plans, adHocSessions);
   if (rpeHigh) items.push({ fingerprint: `rpe_high:${rpeHigh.lastCompletedAt}`, kind: "warning", type: "rpe_high", data: rpeHigh });
 
-  loggedGymExerciseIds(plans).forEach((id) => {
-    const history = exerciseLogHistory(plans, id);
+  loggedGymExerciseIds(plans, adHocSessions).forEach((id) => {
+    const history = exerciseLogHistory(plans, id, adHocSessions);
     if (isPlateaued(history)) {
       const ex = exercises.find((e) => e.id === id);
       items.push({ fingerprint: `plateau:${id}:${history.length}`, kind: "warning", type: "plateau", data: { exerciseId: id, exerciseName: ex?.name || "that lift", sessionCount: history.length } });
@@ -1295,7 +1442,7 @@ function computeKipAlerts({ profile, plans, adHocSessions, matches, season, exer
     items.push({ fingerprint: `niggle_quiet:${s.niggleId}:${s.weeksSince}`, kind: "warning", type: "niggle_quiet", data: s });
   });
 
-  newPrSignals(plans, exercises).forEach((s) => {
+  newPrSignals(plans, exercises, adHocSessions).forEach((s) => {
     items.push({ fingerprint: `pr:${s.exerciseId}:${s.sessionCount}`, kind: "positive", type: "new_pr", data: s });
   });
 
@@ -1394,6 +1541,13 @@ export default function GKTrainerApp() {
   const [kipMessages, setKipMessages] = useState([]);
   const [matches, setMatches] = useState([]);
   const [adHocSessions, setAdHocSessions] = useState([]);
+  // Opponent-team-level rosters — keyed by normalized name, shared across
+  // every match against that team rather than living on any single match.
+  const [opponents, setOpponents] = useState([]);
+  // One-shot seed for auto-resuming into a live recorder right after app
+  // load — never set again afterward, so normal tab navigation later still
+  // shows the ordinary "Resume recording" prompt rather than force-opening it.
+  const [resumeTarget, setResumeTarget] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1407,6 +1561,13 @@ export default function GKTrainerApp() {
           setKipMessages(parsed.kipMessages || []);
           setMatches(parsed.matches || []);
           setAdHocSessions(parsed.adHocSessions || []);
+          setOpponents(parsed.opponents || []);
+
+          const active = findActiveRecording({ plans: parsed.plans, adHocSessions: parsed.adHocSessions, matches: parsed.matches });
+          if (active) {
+            setTab(active.kind === "match" ? "stats" : "plans");
+            setResumeTarget(active);
+          }
         }
       } catch (e) {
         /* no saved data yet */
@@ -1432,7 +1593,7 @@ export default function GKTrainerApp() {
     return computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises: allExercises }).length > 0;
   }, [profile, plans, adHocSessions, matches, season, allExercises]);
 
-  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions }) {
+  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents }) {
     setCustomExercises(nextCustom);
     setPlans(nextPlans);
     setSeason(nextSeason);
@@ -1440,7 +1601,8 @@ export default function GKTrainerApp() {
     setKipMessages(nextKip);
     setMatches(nextMatches);
     setAdHocSessions(nextAdHoc);
-    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc });
+    setOpponents(nextOpponents);
+    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents });
   }
 
   function addExercise(ex) {
@@ -1485,6 +1647,10 @@ export default function GKTrainerApp() {
   function deleteMatch(id) {
     const next = matches.filter((m) => m.id !== id);
     updateAndSave({ nextMatches: next });
+  }
+
+  function saveOpponentRoster(opponentName, roster) {
+    updateAndSave({ nextOpponents: upsertOpponentRoster(opponents, opponentName, roster) });
   }
 
   function saveAdHocSession(session) {
@@ -1546,6 +1712,7 @@ export default function GKTrainerApp() {
             profile={profile}
             matches={matches}
             plans={plans}
+            adHocSessions={adHocSessions}
             onSave={(plan) => {
               savePlan(plan);
               setTab("plans");
@@ -1564,11 +1731,27 @@ export default function GKTrainerApp() {
             adHocSessions={adHocSessions}
             onSaveAdHoc={saveAdHocSession}
             onDeleteAdHoc={deleteAdHocSession}
+            opponents={opponents}
+            onSaveOpponentRoster={saveOpponentRoster}
+            initialLiveTarget={resumeTarget && resumeTarget.kind !== "match" ? resumeTarget : null}
+            onConsumedInitialLiveTarget={() => setResumeTarget(null)}
           />
         )}
         {tab === "advice" && <AdviceHub />}
         {tab === "stats" && (
-          <StatsTab matches={matches} season={season} onSave={saveMatch} onDelete={deleteMatch} plans={plans} exercises={allExercises} />
+          <StatsTab
+            matches={matches}
+            season={season}
+            onSave={saveMatch}
+            onDelete={deleteMatch}
+            plans={plans}
+            exercises={allExercises}
+            adHocSessions={adHocSessions}
+            opponents={opponents}
+            onSaveOpponentRoster={saveOpponentRoster}
+            initialLiveMatchId={resumeTarget && resumeTarget.kind === "match" ? resumeTarget.matchId : null}
+            onConsumedInitialLiveMatchId={() => setResumeTarget(null)}
+          />
         )}
         {tab === "kip" && (
           <KipTab
@@ -1954,7 +2137,7 @@ function Modal({ onClose, children }) {
 /* Builder                                                            */
 /* ---------------------------------------------------------------- */
 
-function Builder({ exercises, season, profile, matches, plans, onSave }) {
+function Builder({ exercises, season, profile, matches, plans, adHocSessions, onSave }) {
   const [step, setStep] = useState("setup");
   const [name, setName] = useState("");
   const [blockSeason, setBlockSeason] = useState(season);
@@ -1976,7 +2159,7 @@ function Builder({ exercises, season, profile, matches, plans, onSave }) {
 
   function startGoalBlock() {
     const finalName = name.trim() || `${GOALS.find((g) => g.id === goalId).name} Block`;
-    const dataContext = useData ? { useData: true, profile, matches, plans } : null;
+    const dataContext = useData ? { useData: true, profile, matches, plans, adHocSessions } : null;
     setDraft(generateGoalBlock(finalName, blockSeason, goalId, exercises, dataContext));
     setStep("edit");
   }
@@ -2385,7 +2568,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc }) {
+function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, initialLiveTarget = null, onConsumedInitialLiveTarget }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2397,6 +2580,15 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
   const [adHocLogTarget, setAdHocLogTarget] = useState(null); // adHocSession
   const [confirmDeleteAdHoc, setConfirmDeleteAdHoc] = useState(null);
   const [matchFormDate, setMatchFormDate] = useState(null); // date string, non-null means "open match form"
+  const [liveTarget, setLiveTarget] = useState(initialLiveTarget); // { kind: "plan", planId, weekId, sessionId, focus } | { kind: "adhoc", sessionId }
+
+  // Seeds liveTarget on the very first mount right after an app-load
+  // auto-resume, then reports back so the parent clears its one-shot state —
+  // otherwise a later, ordinary visit to this tab would wrongly re-trigger it.
+  useEffect(() => {
+    if (initialLiveTarget) onConsumedInitialLiveTarget?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const editingPlan = plans.find((p) => p.id === editingId);
   if (editingPlan) {
@@ -2406,6 +2598,59 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
         exercises={exercises}
         onBack={() => setEditingId(null)}
         onSave={(p) => { onSave(p); setEditingId(null); }}
+      />
+    );
+  }
+
+  // Re-derived fresh from current plans/adHocSessions every render (never
+  // stored as a snapshot) so live updates during recording — and resuming
+  // after the tab was closed — always show the real current state.
+  const livePlan = liveTarget?.kind === "plan" ? plans.find((p) => p.id === liveTarget.planId) : null;
+  const liveSession = liveTarget?.kind === "plan"
+    ? livePlan?.weeks.find((w) => w.weekId === liveTarget.weekId)?.sessions.find((s) => s.sessionId === liveTarget.sessionId)
+    : liveTarget?.kind === "adhoc"
+      ? adHocSessions.find((s) => s.id === liveTarget.sessionId)
+      : null;
+
+  if (liveTarget && liveSession) {
+    return (
+      <LiveSessionRecorder
+        session={liveSession}
+        kind={liveTarget.kind}
+        exercises={exercises}
+        focus={liveTarget.focus}
+        onUpdatePatch={(patch) => {
+          if (liveTarget.kind === "plan") {
+            const next = {
+              ...livePlan,
+              weeks: livePlan.weeks.map((ww) => ww.weekId === liveTarget.weekId
+                ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === liveTarget.sessionId ? { ...ss, ...patch } : ss)) }
+                : ww),
+            };
+            onSave(next);
+          } else {
+            onSaveAdHoc({ ...liveSession, ...patch });
+          }
+        }}
+        onFinish={({ rpe, note, durationMinutes, exercises: exercisesNext, exerciseLogs }) => {
+          if (liveTarget.kind === "plan") {
+            const { recording, ...rest } = liveSession;
+            const next = {
+              ...livePlan,
+              weeks: livePlan.weeks.map((ww) => ww.weekId === liveTarget.weekId
+                ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === liveTarget.sessionId
+                    ? { ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exercises: exercisesNext }
+                    : ss)) }
+                : ww),
+            };
+            onSave(next);
+          } else {
+            const { recording, ...rest } = liveSession;
+            onSaveAdHoc({ ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exerciseLogs });
+          }
+          setLiveTarget(null);
+        }}
+        onExit={() => setLiveTarget(null)}
       />
     );
   }
@@ -2486,11 +2731,29 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
             }}
           />
           <button
-            onClick={() => setLogTarget({ plan: next.plan, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus })}
-            className="w-full py-2 rounded-lg text-xs font-bold text-white"
+            onClick={() => {
+              if (!next.session.recording) {
+                const next2 = {
+                  ...next.plan,
+                  weeks: next.plan.weeks.map((ww) => ww.weekId === next.week.weekId
+                    ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === next.session.sessionId ? { ...ss, recording: startRecording() } : ss)) }
+                    : ww),
+                };
+                onSave(next2);
+              }
+              setLiveTarget({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
+            }}
+            className="w-full py-2.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2"
             style={{ background: "#0E8388" }}
           >
-            Log this session
+            <span className="w-2.5 h-2.5 rounded-full" style={{ background: "#fff" }} /> {next.session.recording ? "Resume recording" : "Record"}
+          </button>
+          <button
+            onClick={() => setLogTarget({ plan: next.plan, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus })}
+            className="w-full mt-1.5 py-1.5 rounded-lg text-[11px] font-semibold"
+            style={{ color: "#8A8779" }}
+          >
+            Or log it after the fact
           </button>
           <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
         </div>
@@ -2642,19 +2905,45 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
 
       <div className="flex items-center justify-between mt-2">
         <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400">One-off sessions</div>
-        <button onClick={() => { setAdHocFormTarget({ date: new Date().toISOString().slice(0, 10) }); setShowAdHocForm(true); }} className="text-[11px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
-          <Plus size={12} /> Add
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              const session = {
+                id: uid(), title: "", notes: "", date: new Date().toISOString().slice(0, 10),
+                exerciseIds: [], doneExerciseIds: [], exerciseLogs: {},
+                completed: false, rpe: null, note: "", completedAt: null,
+                recording: startRecording(),
+              };
+              onSaveAdHoc(session);
+              setLiveTarget({ kind: "adhoc", sessionId: session.id });
+            }}
+            className="text-[11px] font-bold flex items-center gap-1"
+            style={{ color: "#0E8388" }}
+          >
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#0E8388" }} /> Record
+          </button>
+          <button onClick={() => { setAdHocFormTarget({ date: new Date().toISOString().slice(0, 10) }); setShowAdHocForm(true); }} className="text-[11px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+            <Plus size={12} /> Add
+          </button>
+        </div>
       </div>
       {adHocSessions.length === 0 && <div className="text-[11px] text-gray-400 pb-2">No one-off sessions yet.</div>}
       <div className="space-y-1.5">
         {[...adHocSessions].sort((a, b) => new Date(a.date) - new Date(b.date)).map((s) => (
-          <button key={s.id} onClick={() => setAdHocLogTarget(s)} className="w-full text-left bg-white rounded-lg border p-2.5 flex items-center justify-between" style={{ borderColor: "#DAD7CC" }}>
+          <button
+            key={s.id}
+            onClick={() => (s.recording ? setLiveTarget({ kind: "adhoc", sessionId: s.id }) : setAdHocLogTarget(s))}
+            className="w-full text-left bg-white rounded-lg border p-2.5 flex items-center justify-between"
+            style={{ borderColor: s.recording ? "#0E8388" : "#DAD7CC", borderWidth: s.recording ? 2 : 1 }}
+          >
             <div className="flex items-center gap-2">
               {s.completed ? <CheckCircle2 size={14} color="#0E8388" /> : <Circle size={14} color="#DAD7CC" />}
               <div>
-                <div className="text-xs font-bold" style={{ color: "#12213A" }}>{s.title}</div>
-                <div className="text-[10px] text-gray-400">{formatShortDate(s.date)}{s.completed && s.rpe ? ` · RPE ${s.rpe}` : ""}</div>
+                <div className="text-xs font-bold" style={{ color: "#12213A" }}>{s.title || "Untitled session"}</div>
+                <div className="text-[10px] text-gray-400">
+                  {s.recording ? <span style={{ color: "#0E8388" }} className="font-bold">Recording…</span> : formatShortDate(s.date)}
+                  {s.completed && s.rpe ? ` · RPE ${s.rpe}` : ""}
+                </div>
               </div>
             </div>
             <ChevronRight size={14} color="#DAD7CC" />
@@ -2750,6 +3039,8 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
           season={plans[0]?.season || "Winter"}
           matches={matches}
           initialDate={matchFormDate}
+          opponents={opponents}
+          onSaveOpponentRoster={onSaveOpponentRoster}
           onClose={() => setMatchFormDate(null)}
           onSave={(m) => { onSaveMatch(m); setMatchFormDate(null); }}
         />
@@ -2905,6 +3196,11 @@ function AdHocSessionFormModal({ exercises, initialDate, onClose, onSave }) {
 
 function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete }) {
   const [logging, setLogging] = useState(false);
+  const exerciseLogs = session.exerciseLogs || {};
+  const gymEntries = (session.exerciseIds || [])
+    .map((id) => exercises.find((e) => e.id === id))
+    .filter((ex) => ex && ex.type === "Gym")
+    .map((ex) => ({ entryId: ex.id, exerciseName: ex.name }));
   return (
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>{session.title}</h3>
@@ -2915,7 +3211,17 @@ function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete
           {session.exerciseIds.map((id) => {
             const ex = exercises.find((e) => e.id === id);
             if (!ex) return null;
-            return <div key={id} className="text-xs text-gray-600 bg-white rounded-md px-2 py-1.5 border" style={{ borderColor: "#DAD7CC" }}>{ex.name}</div>;
+            const sets = exerciseLogs[id];
+            return (
+              <div key={id} className="text-xs text-gray-600 bg-white rounded-md px-2 py-1.5 border" style={{ borderColor: "#DAD7CC" }}>
+                {ex.name}
+                {sets && sets.length > 0 && (
+                  <div className="text-[10px] text-gray-400 pl-2">
+                    Logged: {sets.map((set) => `${set.weight ?? "–"}kg×${set.reps ?? "–"}`).join(", ")}
+                  </div>
+                )}
+              </div>
+            );
           })}
         </div>
       )}
@@ -2943,14 +3249,194 @@ function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete
       </div>
       {logging && (
         <LogSessionModal
+          gymEntries={gymEntries}
           onClose={() => setLogging(false)}
-          onSave={({ rpe, note }) => {
-            onSave({ ...session, completed: true, rpe, note, completedAt: new Date().toISOString() });
+          onSave={({ rpe, note, gymLogs }) => {
+            const nextExerciseLogs = { ...exerciseLogs };
+            if (gymLogs) Object.entries(gymLogs).forEach(([exerciseId, sets]) => { nextExerciseLogs[exerciseId] = sets; });
+            onSave({ ...session, completed: true, rpe, note, completedAt: new Date().toISOString(), exerciseLogs: nextExerciseLogs });
             setLogging(false);
           }}
         />
       )}
     </Modal>
+  );
+}
+
+// Full-screen live recorder for a training session — either a specific plan
+// session (walking its fixed exercise list) or a pure ad-hoc session (adding
+// exercises as you go). `recording` lives directly on the session being
+// recorded and every action here persists it immediately via onUpdatePatch —
+// the same object the rest of the app already saves, not a parallel one —
+// so closing or backgrounding the tab never loses progress: reopening just
+// finds the same in-progress session and picks up where it left off.
+function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, onFinish, onExit }) {
+  const [now, setNow] = useState(Date.now());
+  const [picker, setPicker] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [finishing, setFinishing] = useState(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const recording = session.recording;
+  const isPaused = !!recording?.pausedAt;
+  const elapsed = recordingElapsedMs(recording, now);
+
+  const items = kind === "plan"
+    ? (session.exercises || []).map((entry) => ({
+        key: entry.entryId, exerciseId: entry.exerciseId, reps: repsDisplay(entry),
+        done: !!entry.done, loggedSets: entry.loggedSets,
+      }))
+    : (session.exerciseIds || []).map((id) => ({
+        key: id, exerciseId: id, reps: null,
+        done: (session.doneExerciseIds || []).includes(id), loggedSets: (session.exerciseLogs || {})[id],
+      }));
+
+  const doneCount = items.filter((i) => i.done || (i.loggedSets && i.loggedSets.length > 0)).length;
+
+  function toggleDone(item) {
+    if (kind === "plan") {
+      onUpdatePatch({ exercises: session.exercises.map((e) => (e.entryId === item.key ? { ...e, done: !e.done } : e)) });
+    } else {
+      const doneIds = session.doneExerciseIds || [];
+      const next = doneIds.includes(item.key) ? doneIds.filter((id) => id !== item.key) : [...doneIds, item.key];
+      onUpdatePatch({ doneExerciseIds: next });
+    }
+  }
+
+  function saveGymSets(item, sets) {
+    if (kind === "plan") {
+      onUpdatePatch({ exercises: session.exercises.map((e) => (e.entryId === item.key ? { ...e, loggedSets: sets } : e)) });
+    } else {
+      onUpdatePatch({ exerciseLogs: { ...(session.exerciseLogs || {}), [item.key]: sets } });
+    }
+  }
+
+  function addAdHocExercise(ex) {
+    onUpdatePatch({ exerciseIds: [...(session.exerciseIds || []), ex.id] });
+    setPicker(false);
+  }
+
+  function removeAdHocExercise(id) {
+    onUpdatePatch({
+      exerciseIds: (session.exerciseIds || []).filter((x) => x !== id),
+      doneExerciseIds: (session.doneExerciseIds || []).filter((x) => x !== id),
+    });
+  }
+
+  const gymEntries = items
+    .map((item) => ({ item, ex: exercises.find((e) => e.id === item.exerciseId) }))
+    .filter(({ ex }) => ex && ex.type === "Gym")
+    .map(({ item, ex }) => ({ entryId: item.key, exerciseName: ex.name }));
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
+          <ChevronDown size={14} /> Minimize
+        </button>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wide text-white/50">Recording</div>
+            <div className="text-lg font-black text-white">{kind === "plan" ? "Training session" : (session.title || "One-off session")}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-2xl font-black tabular-nums" style={{ color: isPaused ? "#E2984B" : "#0E8388" }}>{formatElapsed(elapsed)}</div>
+            {isPaused && <div className="text-[10px] font-bold uppercase tracking-wide" style={{ color: "#E2984B" }}>Paused</div>}
+          </div>
+        </div>
+        <div className="flex items-center gap-3 mt-2 text-[11px] text-white/70">
+          <span>{doneCount}/{items.length} exercises done</span>
+          {focus && <span>· "{focus}"</span>}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+        {items.map((item) => {
+          const ex = exercises.find((e) => e.id === item.exerciseId);
+          if (!ex) return null;
+          const isGym = ex.type === "Gym";
+          const expanded = expandedId === item.key;
+          const hasLogged = item.loggedSets && item.loggedSets.length > 0;
+          return (
+            <div key={item.key} className="bg-white rounded-lg border overflow-hidden" style={{ borderColor: "#DAD7CC" }}>
+              <button
+                onClick={() => (isGym ? setExpandedId(expanded ? null : item.key) : toggleDone(item))}
+                className="w-full p-3 flex items-center gap-2.5 text-left"
+              >
+                {(item.done || hasLogged) ? <CheckCircle2 size={18} color="#0E8388" className="shrink-0" /> : <Circle size={18} color="#DAD7CC" className="shrink-0" />}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold" style={{ color: "#12213A" }}>{ex.name}</div>
+                  {item.reps && <div className="text-[11px] text-gray-400">{item.reps}</div>}
+                  {hasLogged && (
+                    <div className="text-[10px] text-gray-400">
+                      {item.loggedSets.map((s, i) => `${s.weight ?? "–"}kg×${s.reps ?? "–"}`).join(", ")}
+                    </div>
+                  )}
+                </div>
+                {isGym && (expanded ? <ChevronDown size={16} className="rotate-180 transition-transform" /> : <ChevronRight size={16} color="#DAD7CC" />)}
+                {kind === "adhoc" && !isGym && (
+                  <span onClick={(e) => { e.stopPropagation(); removeAdHocExercise(item.key); }} className="p-1">
+                    <X size={13} color="#C1483B" />
+                  </span>
+                )}
+              </button>
+              {isGym && expanded && (
+                <div className="px-3 pb-3">
+                  <GymSetLogger exerciseName={ex.name} sets={item.loggedSets || []} onChange={(sets) => saveGymSets(item, sets)} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {items.length === 0 && <div className="text-center text-sm text-gray-400 py-8">No exercises yet.</div>}
+
+        {kind === "adhoc" && (
+          <button onClick={() => setPicker(true)} className="w-full py-2.5 rounded-lg text-sm font-bold border flex items-center justify-center gap-1.5" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
+            <Plus size={14} /> Add exercise
+          </button>
+        )}
+      </div>
+
+      <div className="shrink-0 px-4 py-3 border-t bg-white flex gap-2" style={{ borderColor: "#DAD7CC" }}>
+        <button
+          onClick={() => onUpdatePatch({ recording: isPaused ? resumeRecording(recording) : pauseRecording(recording) })}
+          className="flex-1 py-3 rounded-lg text-sm font-bold border"
+          style={{ borderColor: "#DAD7CC", color: "#12213A" }}
+        >
+          {isPaused ? "Resume" : "Pause"}
+        </button>
+        <button onClick={() => setFinishing(true)} className="flex-1 py-3 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Finish
+        </button>
+      </div>
+
+      {picker && <ExercisePickerModal exercises={exercises} onClose={() => setPicker(false)} onPick={addAdHocExercise} />}
+
+      {finishing && (
+        <LogSessionModal
+          focus={focus}
+          gymEntries={gymEntries}
+          onClose={() => setFinishing(false)}
+          onSave={({ rpe, note, gymLogs }) => {
+            const durationMinutes = recordingElapsedMinutes(recording);
+            if (kind === "plan") {
+              const exercisesNext = session.exercises.map((entry) =>
+                gymLogs && gymLogs[entry.entryId] ? { ...entry, loggedSets: gymLogs[entry.entryId] } : entry
+              );
+              onFinish({ rpe, note, durationMinutes, exercises: exercisesNext });
+            } else {
+              const nextExerciseLogs = { ...(session.exerciseLogs || {}) };
+              if (gymLogs) Object.entries(gymLogs).forEach(([exerciseId, sets]) => { nextExerciseLogs[exerciseId] = sets; });
+              onFinish({ rpe, note, durationMinutes, exerciseLogs: nextExerciseLogs });
+            }
+          }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -3432,7 +3918,7 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
     (async () => {
       try {
         const alertSummary = items.map(describeAlertItem).filter(Boolean).join("\n");
-        const basePrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises);
+        const basePrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
         const alertPrompt = `${basePrompt}\n\nALERT CONTEXT:\nYou're proactively checking in on the keeper, not responding to a question they asked. The following is true right now:\n${alertSummary}\n\nWrite ONE short, natural message in your own voice that covers all of the above as a single coherent check-in — don't list them like a notification, weave them together the way a coach would bring up a few things at once in conversation. Lead with whichever matters most. If there's genuinely good news mixed in with a concern, don't bury the good news under the concern. Keep it to a few sentences.`;
         const triggerMessage = { role: "user", content: "(Automatic check-in trigger — not a message from the keeper. Don't acknowledge this instruction; just deliver the proactive message described in ALERT CONTEXT.)" };
         const textResp = await callKip(alertPrompt, [...messages.map((m) => ({ role: m.role, content: m.content })), triggerMessage]);
@@ -3462,7 +3948,7 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
     setSending(true);
     setError(null);
     try {
-      const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises);
+      const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
       const textResp = await callKip(systemPrompt, nextMessages.map((m) => ({ role: m.role, content: m.content })));
       const assistantMsg = { role: "assistant", content: textResp || "Sorry, I didn't quite get a response there — try again?", ts: Date.now() };
       onSaveMessages([...nextMessages, assistantMsg]);
@@ -3706,11 +4192,24 @@ function GoalGrid({ zones, onZoneTap, size = "normal" }) {
   );
 }
 
-function ShotLogModal({ season, zone, videoUrl, onClose, onSave }) {
+function ShotLogModal({ season, zone, videoUrl, roster = [], onClose, onSave }) {
   const [outcome, setOutcome] = useState(null);
+  // undefined = type not chosen yet; null = "logged without a type" — both
+  // distinct from "no roster step needed", which is decided by roster.length.
+  const [shotType, setShotType] = useState(undefined);
   const [timestamp, setTimestamp] = useState("");
   const types = shotTypesFor(season);
   const videoTimestamp = timestamp.trim() || null;
+
+  function chooseType(t) {
+    if (roster.length > 0) setShotType(t);
+    else onSave({ zone, outcome, shotType: t, videoTimestamp, shooterNumber: null });
+  }
+  function finalize(shooterNumber) {
+    onSave({ zone, outcome, shotType, videoTimestamp, shooterNumber: shooterNumber || null });
+  }
+
+  const showShooterStep = outcome && shotType !== undefined && roster.length > 0;
 
   return (
     <Modal onClose={onClose}>
@@ -3724,7 +4223,7 @@ function ShotLogModal({ season, zone, videoUrl, onClose, onSave }) {
           </div>
         </>
       )}
-      {outcome && (
+      {outcome && shotType === undefined && (
         <>
           <p className="text-xs text-gray-500 mb-3">
             {outcome} — {season === "Summer" ? "what type of shot?" : "shot origin (optional)"}
@@ -3741,7 +4240,7 @@ function ShotLogModal({ season, zone, videoUrl, onClose, onSave }) {
             {types.map((t) => (
               <button
                 key={t}
-                onClick={() => onSave({ zone, outcome, shotType: t, videoTimestamp })}
+                onClick={() => chooseType(t)}
                 className="px-3 py-2 rounded-lg text-xs font-bold border"
                 style={{ borderColor: "#DAD7CC" }}
               >
@@ -3755,41 +4254,152 @@ function ShotLogModal({ season, zone, videoUrl, onClose, onSave }) {
             ))}
           </div>
           {season !== "Summer" && (
-            <button onClick={() => onSave({ zone, outcome, shotType: null, videoTimestamp })} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
+            <button onClick={() => chooseType(null)} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
               Log without a type
             </button>
           )}
+        </>
+      )}
+      {showShooterStep && (
+        <>
+          <p className="text-xs text-gray-500 mb-3">Who took the shot? (optional)</p>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {roster.map((r, i) => (
+              <button
+                key={i}
+                onClick={() => finalize(r.number)}
+                className="px-3 py-2 rounded-lg text-xs font-bold border"
+                style={{ borderColor: "#DAD7CC" }}
+              >
+                {r.number && `#${r.number}`}{r.number && r.name ? " " : ""}{r.name}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => finalize(null)} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
+            Skip
+          </button>
         </>
       )}
     </Modal>
   );
 }
 
-function OpponentHistoryNote({ matches, opponent, excludeId }) {
+// Tappable even for an opponent with no match history yet — a roster can be
+// built up-front, before the first match against a team is ever logged.
+function OpponentHistoryNote({ matches, opponent, excludeId, roster, onTap }) {
   const rec = opponentRecord(matches, opponent, excludeId);
-  if (!rec) return null;
+  const name = (opponent || "").trim();
+  if (!name) return null;
+  const danger = rec ? mostDangerousShooter(matches, opponent, roster) : null;
   return (
-    <div className="text-[11px] text-gray-500 mt-1">
-      {rec.count} previous match{rec.count !== 1 ? "es" : ""} vs {opponent.trim()}
-      {rec.recordKnown && ` · ${rec.wins}W-${rec.losses}L${rec.draws ? `-${rec.draws}D` : ""}`}
-      {rec.savePct !== null && ` · ${rec.savePct}% saved`}
-    </div>
+    <button type="button" onClick={onTap} className="text-[11px] text-gray-500 mt-1 text-left underline decoration-dotted underline-offset-2">
+      {rec ? (
+        <>
+          {rec.count} previous match{rec.count !== 1 ? "es" : ""} vs {name}
+          {rec.recordKnown && ` · ${rec.wins}W-${rec.losses}L${rec.draws ? `-${rec.draws}D` : ""}`}
+          {rec.savePct !== null && ` · ${rec.savePct}% saved`}
+          {danger && ` · watch #${danger.number}${danger.name ? ` ${danger.name}` : ""} (${danger.goals} goal${danger.goals !== 1 ? "s" : ""})`}
+        </>
+      ) : (
+        `Manage roster for ${name}`
+      )}
+    </button>
   );
 }
 
-function MatchFormModal({ season, matches, onClose, onSave, initialDate }) {
+function OpponentDetailModal({ opponentName, opponents, matches, onClose, onSaveRoster }) {
+  const existing = findOpponentRoster(opponents, opponentName);
+  const [roster, setRoster] = useState(existing?.roster || []);
+  const [numberInput, setNumberInput] = useState("");
+  const [nameInput, setNameInput] = useState("");
+  const name = (opponentName || "").trim();
+  const rec = opponentRecord(matches, opponentName);
+  const stats = shooterStats(matches, opponentName, roster);
+
+  function addEntry() {
+    const number = numberInput.trim();
+    const shooterName = nameInput.trim();
+    if (!number && !shooterName) return;
+    const next = [...roster, { number: number || null, name: shooterName || null }];
+    setRoster(next);
+    onSaveRoster(next);
+    setNumberInput("");
+    setNameInput("");
+  }
+  function removeEntry(i) {
+    const next = roster.filter((_, idx) => idx !== i);
+    setRoster(next);
+    onSaveRoster(next);
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>{name}</h3>
+
+      {rec ? (
+        <div className="flex items-center gap-3 mb-3 text-xs text-gray-500">
+          <span>{rec.count} match{rec.count !== 1 ? "es" : ""}</span>
+          {rec.recordKnown && <span>{rec.wins}W-{rec.losses}L{rec.draws ? `-${rec.draws}D` : ""}</span>}
+          {rec.savePct !== null && <span>{rec.savePct}% saved</span>}
+        </div>
+      ) : (
+        <p className="text-xs text-gray-500 mb-3">No matches logged against this opponent yet.</p>
+      )}
+
+      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Roster</div>
+      <div className="space-y-1.5 mb-3 max-h-48 overflow-y-auto">
+        {roster.map((r, i) => (
+          <div key={i} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-sm">
+              {r.number && <span className="font-bold" style={{ color: "#12213A" }}>#{r.number}</span>}{r.number && r.name ? " " : ""}{r.name}
+            </div>
+            <button onClick={() => removeEntry(i)}><X size={13} color="#C1483B" /></button>
+          </div>
+        ))}
+        {roster.length === 0 && <div className="text-xs text-gray-400">No shooters added yet.</div>}
+      </div>
+
+      <div className="flex gap-2 mb-4">
+        <input className="input" style={{ width: "64px", flexShrink: 0 }} placeholder="#" value={numberInput} onChange={(e) => setNumberInput(e.target.value)} />
+        <input className="input flex-1" placeholder="Shooter name (optional)" value={nameInput} onChange={(e) => setNameInput(e.target.value)} />
+        <button onClick={addEntry} className="px-3 py-2 rounded-lg text-white text-xs font-bold shrink-0" style={{ background: "#0E8388" }}>Add</button>
+      </div>
+
+      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Per-shooter breakdown</div>
+      {stats.length === 0 ? (
+        <p className="text-xs text-gray-400">No shots logged with a shooter attached yet — pick a shooter after logging a zone/outcome to build this out.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {stats.map((s) => (
+            <div key={s.number} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+              <div className="text-sm">
+                <span className="font-bold" style={{ color: "#12213A" }}>#{s.number}</span>{s.name ? ` ${s.name}` : ""}
+              </div>
+              <div className="text-xs text-gray-500">
+                {s.goals} goal{s.goals !== 1 ? "s" : ""}{s.savePct !== null && ` · ${s.savePct}% saved (${s.total})`}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function MatchFormModal({ season, matches, onClose, onSave, initialDate, title = "New match", submitLabel = "Create match", opponents = [], onSaveOpponentRoster }) {
   const [form, setForm] = useState({ date: initialDate || new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "" });
+  const [rosterOpen, setRosterOpen] = useState(false);
   const valid = form.date && form.opponent.trim();
   return (
     <Modal onClose={onClose}>
-      <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>New match</h3>
+      <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>{title}</h3>
       <div className="space-y-3">
         <Field label="Date">
           <input type="date" className="input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
         </Field>
         <Field label="Opponent">
           <input className="input" placeholder="e.g. North Shore" value={form.opponent} onChange={(e) => setForm({ ...form, opponent: e.target.value })} />
-          <OpponentHistoryNote matches={matches} opponent={form.opponent} />
+          <OpponentHistoryNote matches={matches} opponent={form.opponent} roster={findOpponentRoster(opponents, form.opponent)?.roster} onTap={() => setRosterOpen(true)} />
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Competition">
@@ -3813,9 +4423,19 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate }) {
           <input className="input" placeholder="YouTube, Drive, wherever the footage lives" value={form.videoUrl} onChange={(e) => setForm({ ...form, videoUrl: e.target.value })} />
         </Field>
         <button disabled={!valid} onClick={() => onSave({ id: uid(), ...form, shots: [] })} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
-          Create match
+          {submitLabel}
         </button>
       </div>
+
+      {rosterOpen && (
+        <OpponentDetailModal
+          opponentName={form.opponent}
+          opponents={opponents}
+          matches={matches}
+          onClose={() => setRosterOpen(false)}
+          onSaveRoster={(roster) => onSaveOpponentRoster?.(form.opponent, roster)}
+        />
+      )}
     </Modal>
   );
 }
@@ -3852,9 +4472,10 @@ function MatchVideoLink({ match, onSave }) {
   );
 }
 
-function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
+function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [], onSaveOpponentRoster }) {
   const [zoneTap, setZoneTap] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [rosterOpen, setRosterOpen] = useState(false);
   const zones = emptyZoneMap();
   (match.shots || []).forEach((s) => {
     if (!zones[s.zone]) return;
@@ -3867,8 +4488,8 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
   const totalPoints = (match.shots || []).reduce((a, s) => a + (s.outcome === "Goal" ? pointsForShot(match.season, s.shotType) : 0), 0);
   const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
 
-  function logShot({ zone, outcome, shotType, videoTimestamp }) {
-    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null };
+  function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber }) {
+    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null };
     onSave({ ...match, shots: [...(match.shots || []), shot] });
     setZoneTap(null);
   }
@@ -3885,7 +4506,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
         <div>
           <div className="text-lg font-black" style={{ color: "#12213A" }}>vs {match.opponent}</div>
           <div className="text-xs text-gray-500">{match.date}{match.competition ? ` · ${match.competition}` : ""}{match.result ? ` · ${match.result}` : ""}</div>
-          <OpponentHistoryNote matches={matches} opponent={match.opponent} excludeId={match.id} />
+          <OpponentHistoryNote matches={matches} opponent={match.opponent} excludeId={match.id} roster={findOpponentRoster(opponents, match.opponent)?.roster} onTap={() => setRosterOpen(true)} />
         </div>
         <SeasonBadge season={match.season} />
       </div>
@@ -3920,6 +4541,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
                   <span className="font-bold" style={{ color: s.outcome === "Save" ? "#0E8388" : "#C1483B" }}>{s.outcome}</span>
                   <span className="text-gray-500">{ZONE_LABELS[s.zone]}</span>
                   {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
+                  {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
                   {s.outcome === "Goal" && match.season === "Summer" && (
                     <span className="text-[10px] font-black" style={{ color: "#8A8779" }}>+{pointsForShot(match.season, s.shotType)}</span>
                   )}
@@ -3940,7 +4562,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
         <Trash2 size={12} /> Delete match
       </button>
 
-      {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} onClose={() => setZoneTap(null)} onSave={logShot} />}
+      {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} roster={findOpponentRoster(opponents, match.opponent)?.roster} onClose={() => setZoneTap(null)} onSave={logShot} />}
 
       {confirmDelete && (
         <Modal onClose={() => setConfirmDelete(false)}>
@@ -3952,18 +4574,201 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete }) {
           </div>
         </Modal>
       )}
+
+      {rosterOpen && (
+        <OpponentDetailModal
+          opponentName={match.opponent}
+          opponents={opponents}
+          matches={matches}
+          onClose={() => setRosterOpen(false)}
+          onSaveRoster={(roster) => onSaveOpponentRoster?.(match.opponent, roster)}
+        />
+      )}
     </div>
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises }) {
+// Shown on Finish only if the match has neither a competition nor a result
+// yet — a live-recorded match is created with just an opponent, so these
+// "post-match" fields (which MatchFormModal already collects for a
+// retrospective match) are still outstanding at that point.
+function MatchWrapUpModal({ match, durationMinutes, onClose, onSave }) {
+  const [competition, setCompetition] = useState(match.competition || "");
+  const [result, setResult] = useState(match.result || "");
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Wrap up the match</h3>
+      <p className="text-xs text-gray-500 mb-3">Optional — fill in the final score whenever you have it.</p>
+      <div className="space-y-3">
+        <Field label="Competition">
+          <input className="input" placeholder="Optional" value={competition} onChange={(e) => setCompetition(e.target.value)} />
+        </Field>
+        <Field label="Result">
+          <input className="input" placeholder="e.g. 24-19 W" value={result} onChange={(e) => setResult(e.target.value)} />
+        </Field>
+        <button onClick={() => onSave({ competition, result, durationMinutes })} className="w-full py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Save
+        </button>
+        <button onClick={() => onSave({ durationMinutes })} className="w-full py-1.5 text-xs font-semibold" style={{ color: "#8A8779" }}>
+          Skip for now
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit }) {
+  const [now, setNow] = useState(Date.now());
+  const [zoneTap, setZoneTap] = useState(null);
+  const [wrappingUp, setWrappingUp] = useState(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const recording = match.recording;
+  const isPaused = !!recording?.pausedAt;
+  const elapsed = recordingElapsedMs(recording, now);
+
+  const zones = emptyZoneMap();
+  (match.shots || []).forEach((s) => {
+    if (!zones[s.zone]) return;
+    if (s.outcome === "Save") zones[s.zone].saves++;
+    else zones[s.zone].goals++;
+  });
+  const totalShots = (match.shots || []).length;
+  const totalSaves = (match.shots || []).filter((s) => s.outcome === "Save").length;
+  const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
+
+  function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber }) {
+    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null };
+    onUpdatePatch({ shots: [...(match.shots || []), shot] });
+    setZoneTap(null);
+  }
+  function removeShot(id) {
+    onUpdatePatch({ shots: (match.shots || []).filter((s) => s.id !== id) });
+  }
+
+  function finish() {
+    if (!match.competition && !match.result) setWrappingUp(true);
+    else onFinish({ durationMinutes: recordingElapsedMinutes(recording) });
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
+          <ChevronDown size={14} /> Minimize
+        </button>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wide text-white/50">Recording</div>
+            <div className="text-lg font-black text-white">vs {match.opponent}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-2xl font-black tabular-nums" style={{ color: isPaused ? "#E2984B" : "#0E8388" }}>{formatElapsed(elapsed)}</div>
+            {isPaused && <div className="text-[10px] font-bold uppercase tracking-wide" style={{ color: "#E2984B" }}>Paused</div>}
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 mt-2 text-[11px] text-white/70">
+          <span>{totalShots} shot{totalShots !== 1 ? "s" : ""} faced</span>
+          <span>· {savePct}% saved</span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Tap a zone to log a shot</div>
+        <GoalGrid zones={zones} onZoneTap={(z) => setZoneTap(z)} />
+
+        {totalShots > 0 && (
+          <div className="mt-4">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Logged shots</div>
+            <div className="space-y-1.5">
+              {[...(match.shots || [])].reverse().map((s) => (
+                <div key={s.id} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-bold" style={{ color: s.outcome === "Save" ? "#0E8388" : "#C1483B" }}>{s.outcome}</span>
+                    <span className="text-gray-500">{ZONE_LABELS[s.zone]}</span>
+                    {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
+                  {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
+                  </div>
+                  <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="shrink-0 px-4 py-3 border-t bg-white flex gap-2" style={{ borderColor: "#DAD7CC" }}>
+        <button
+          onClick={() => onUpdatePatch({ recording: isPaused ? resumeRecording(recording) : pauseRecording(recording) })}
+          className="flex-1 py-3 rounded-lg text-sm font-bold border"
+          style={{ borderColor: "#DAD7CC", color: "#12213A" }}
+        >
+          {isPaused ? "Resume" : "Pause"}
+        </button>
+        <button onClick={finish} className="flex-1 py-3 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Finish
+        </button>
+      </div>
+
+      {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} roster={findOpponentRoster(opponents, match.opponent)?.roster} onClose={() => setZoneTap(null)} onSave={logShot} />}
+
+      {wrappingUp && (
+        <MatchWrapUpModal
+          match={match}
+          durationMinutes={recordingElapsedMinutes(recording)}
+          onClose={() => setWrappingUp(false)}
+          onSave={(patch) => onFinish(patch)}
+        />
+      )}
+    </div>
+  );
+}
+
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, initialLiveMatchId = null, onConsumedInitialLiveMatchId }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
+  const [showLiveForm, setShowLiveForm] = useState(false);
+  const [liveMatchId, setLiveMatchId] = useState(initialLiveMatchId);
   const [filter, setFilter] = useState(season);
+
+  // Seeds liveMatchId on the very first mount right after an app-load
+  // auto-resume, then reports back so the parent clears its one-shot state —
+  // otherwise a later, ordinary visit to this tab would wrongly re-trigger it.
+  useEffect(() => {
+    if (initialLiveMatchId) onConsumedInitialLiveMatchId?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Otherwise not auto-rendered on mount — only surfaced as a "Resume
+  // recording" prompt, same convention as Plans' Today card, so Minimize
+  // actually minimizes rather than re-forcing the recorder open.
+  const inProgressMatch = matches.find((m) => m.recording);
+
+  const liveMatch = matches.find((m) => m.id === liveMatchId);
+  if (liveMatch) {
+    return (
+      <LiveMatchRecorder
+        match={liveMatch}
+        opponents={opponents}
+        onUpdatePatch={(patch) => onSave({ ...liveMatch, ...patch })}
+        onFinish={(patch) => {
+          const { recording, ...rest } = liveMatch;
+          onSave({ ...rest, ...patch });
+          setLiveMatchId(null);
+          setOpenMatchId(liveMatch.id);
+        }}
+        onExit={() => setLiveMatchId(null)}
+      />
+    );
+  }
 
   const openMatch = matches.find((m) => m.id === openMatchId);
   if (openMatch) {
-    return <MatchDetail match={openMatch} matches={matches} onBack={() => setOpenMatchId(null)} onSave={onSave} onDelete={onDelete} />;
+    return <MatchDetail match={openMatch} matches={matches} onBack={() => setOpenMatchId(null)} onSave={onSave} onDelete={onDelete} opponents={opponents} onSaveOpponentRoster={onSaveOpponentRoster} />;
   }
 
   const agg = aggregateMatchStats(matches, filter);
@@ -3980,9 +4785,18 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises }) {
     <div className="px-4 pt-4 pb-8">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Match stats</h2>
-        <button onClick={() => setShowForm(true)} className="p-2 rounded-lg text-white" style={{ background: "#12213A" }}>
-          <Plus size={16} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => (inProgressMatch ? setLiveMatchId(inProgressMatch.id) : setShowLiveForm(true))}
+            className="px-3 py-2 rounded-lg text-xs font-bold text-white flex items-center gap-1.5"
+            style={{ background: "#0E8388" }}
+          >
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#fff" }} /> {inProgressMatch ? "Resume recording" : "Record"}
+          </button>
+          <button onClick={() => setShowForm(true)} className="p-2 rounded-lg text-white" style={{ background: "#12213A" }}>
+            <Plus size={16} />
+          </button>
+        </div>
       </div>
 
       <div className="flex gap-1.5 mb-4">
@@ -4092,22 +4906,42 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises }) {
         <MatchFormModal
           season={season}
           matches={matches}
+          opponents={opponents}
+          onSaveOpponentRoster={onSaveOpponentRoster}
           onClose={() => setShowForm(false)}
           onSave={(m) => { onSave(m); setShowForm(false); setOpenMatchId(m.id); }}
         />
       )}
 
-      <WorkoutStats plans={plans} exercises={exercises} />
+      {showLiveForm && (
+        <MatchFormModal
+          season={season}
+          matches={matches}
+          opponents={opponents}
+          onSaveOpponentRoster={onSaveOpponentRoster}
+          title="Start a live match"
+          submitLabel="Start recording"
+          onClose={() => setShowLiveForm(false)}
+          onSave={(m) => {
+            const withRecording = { ...m, recording: startRecording() };
+            onSave(withRecording);
+            setShowLiveForm(false);
+            setLiveMatchId(withRecording.id);
+          }}
+        />
+      )}
+
+      <WorkoutStats plans={plans} exercises={exercises} adHocSessions={adHocSessions} />
     </div>
   );
 }
 
-function WorkoutStats({ plans, exercises }) {
+function WorkoutStats({ plans, exercises, adHocSessions }) {
   const [openId, setOpenId] = useState(null);
 
   const withHistory = exercises
     .filter((ex) => ex.type === "Gym")
-    .map((ex) => ({ ex, history: exerciseLogHistory(plans, ex.id) }))
+    .map((ex) => ({ ex, history: exerciseLogHistory(plans, ex.id, adHocSessions) }))
     .filter(({ history }) => history.length > 0);
 
   return (
