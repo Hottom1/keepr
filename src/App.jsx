@@ -5,7 +5,7 @@ import {
   Users, User, ListChecks, BookOpen, ArrowLeft, Circle, CheckCircle2,
   Lightbulb, Eye, ShieldCheck, Zap, Brain, Compass, MessageCircle,
   Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw, Video,
-  ClipboardList, Paperclip, Upload,
+  ClipboardList, Paperclip, Upload, Trophy, Bell, BellOff, Lock,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { loadUserData, saveUserData, uploadNiggleFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
@@ -464,14 +464,7 @@ function buildKipSystemPrompt(profile, plans, season, matches, exercises = []) {
     "",
     "GYM TRAINING LOG:",
     (() => {
-      const gymExerciseIds = new Set();
-      plans.forEach((p) => p.weeks.forEach((w) => w.sessions.forEach((s) => {
-        if (!s.completed) return;
-        (s.exercises || []).forEach((entry) => {
-          if (entry.loggedSets && entry.loggedSets.length > 0) gymExerciseIds.add(entry.exerciseId);
-        });
-      })));
-      const summaries = [...gymExerciseIds].map((id) => {
+      const summaries = [...loggedGymExerciseIds(plans)].map((id) => {
         const ex = exercises.find((e) => e.id === id);
         const history = exerciseLogHistory(plans, id);
         if (!ex || history.length === 0) return null;
@@ -1026,6 +1019,322 @@ function exerciseLogHistory(plans, exerciseId) {
 }
 
 /* ---------------------------------------------------------------- */
+/* Kip alerts, points, and badges                                     */
+/* Everything here is derived fresh from existing data, same as        */
+/* rpeTrend/weeklyStreak — no separate mutable ledger. The only new    */
+/* persisted state is "already surfaced" tracking (profile.seenAlert-  */
+/* Fingerprints / seenBadgeIds), so a still-true condition doesn't     */
+/* re-alert every time the app opens.                                  */
+/* ---------------------------------------------------------------- */
+
+const SESSION_POINTS = 10;
+const MATCH_POINTS = 15;
+const PR_POINTS = 25;
+
+function loggedGymExerciseIds(plans) {
+  const ids = new Set();
+  plans.forEach((p) => p.weeks.forEach((w) => w.sessions.forEach((s) => {
+    if (!s.completed) return;
+    (s.exercises || []).forEach((entry) => {
+      if (entry.loggedSets && entry.loggedSets.length > 0) ids.add(entry.exerciseId);
+    });
+  })));
+  return ids;
+}
+
+function totalPrCount(plans) {
+  let count = 0;
+  loggedGymExerciseIds(plans).forEach((id) => {
+    count += exerciseLogHistory(plans, id).filter((h) => h.isPr).length;
+  });
+  return count;
+}
+
+function computeTotalPoints(plans, adHocSessions, matches) {
+  const planSessionsDone = plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.filter((s) => s.completed).length, 0), 0);
+  const adHocDone = (adHocSessions || []).filter((s) => s.completed).length;
+  const sessionsCompleted = planSessionsDone + adHocDone;
+  const matchesLogged = (matches || []).length;
+  const prsHit = totalPrCount(plans);
+  return {
+    total: sessionsCompleted * SESSION_POINTS + matchesLogged * MATCH_POINTS + prsHit * PR_POINTS,
+    sessionsCompleted,
+    matchesLogged,
+    prsHit,
+  };
+}
+
+const BADGES = [
+  { id: "first_save", name: "First Save", description: "Completed your first training session." },
+  { id: "clean_week", name: "Clean Sheet Week", description: "Completed every session in a planned week." },
+  { id: "month_streak", name: "Month of Reps", description: "Trained four weeks in a row." },
+  { id: "block_complete", name: "Block Complete", description: "Finished every session in a full 6-week block." },
+];
+
+function computeEarnedBadgeIds(plans, adHocSessions) {
+  const earned = new Set();
+
+  const anyCompleted = plans.some((p) => p.weeks.some((w) => w.sessions.some((s) => s.completed)))
+    || (adHocSessions || []).some((s) => s.completed);
+  if (anyCompleted) earned.add("first_save");
+
+  const hasCleanWeek = plans.some((p) => p.weeks.some((w) => w.sessions.length > 0 && w.sessions.every((s) => s.completed)));
+  if (hasCleanWeek) earned.add("clean_week");
+
+  // Reuses weeklyStreak exactly as-is, per explicit "no change needed" scope —
+  // plan sessions only, not ad-hoc, matching that feature's existing definition.
+  if (weeklyStreak(plans) >= 4) earned.add("month_streak");
+
+  const hasCompletedBlock = plans.some((p) => {
+    const total = p.weeks.reduce((a, w) => a + w.sessions.length, 0);
+    if (total === 0) return false;
+    const done = p.weeks.reduce((a, w) => a + w.sessions.filter((s) => s.completed).length, 0);
+    return done === total;
+  });
+  if (hasCompletedBlock) earned.add("block_complete");
+
+  return earned;
+}
+
+// A genuine trend, not a restated snapshot: splits the season's matches into
+// an older and newer half and requires a real swing in both direction and
+// sample size before calling it a trend either way.
+const TREND_MIN_MATCHES = 4;
+const TREND_MIN_SHOTS_PER_HALF = 4;
+const TREND_SWING_POINTS = 15;
+
+function splitMatchHalves(matches, seasonFilter) {
+  const subset = matches.filter((m) => m.season === seasonFilter).sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (subset.length < TREND_MIN_MATCHES) return null;
+  const mid = Math.floor(subset.length / 2);
+  return { older: subset.slice(0, mid), newer: subset.slice(mid) };
+}
+
+function zoneTallies(matchesSubset) {
+  const zones = emptyZoneMap();
+  matchesSubset.forEach((m) => (m.shots || []).forEach((s) => {
+    const z = zones[s.zone];
+    if (!z) return;
+    if (s.outcome === "Save") z.saves++; else z.goals++;
+  }));
+  return zones;
+}
+
+function zoneTrendSignals(matches, season) {
+  const halves = splitMatchHalves(matches, season);
+  if (!halves) return [];
+  const older = zoneTallies(halves.older);
+  const newer = zoneTallies(halves.newer);
+  const signals = [];
+  Object.keys(older).forEach((zone) => {
+    const o = older[zone], n = newer[zone];
+    const oShots = o.saves + o.goals, nShots = n.saves + n.goals;
+    if (oShots < TREND_MIN_SHOTS_PER_HALF || nShots < TREND_MIN_SHOTS_PER_HALF) return;
+    const oPct = Math.round((o.saves / oShots) * 100);
+    const nPct = Math.round((n.saves / nShots) * 100);
+    const delta = nPct - oPct;
+    if (delta <= -TREND_SWING_POINTS) signals.push({ zone, direction: "worse", oldPct: oPct, newPct: nPct });
+    else if (delta >= TREND_SWING_POINTS) signals.push({ zone, direction: "better", oldPct: oPct, newPct: nPct });
+  });
+  return signals;
+}
+
+function shotTypeTallies(matchesSubset) {
+  const map = {};
+  matchesSubset.forEach((m) => (m.shots || []).forEach((s) => {
+    const t = s.shotType || "Regular";
+    if (!map[t]) map[t] = { saves: 0, goals: 0 };
+    if (s.outcome === "Save") map[t].saves++; else map[t].goals++;
+  }));
+  return map;
+}
+
+// Beach-only, since indoor shot-type tags are context only (every indoor
+// goal is worth the same, per pointsForShot's own comment).
+function shotTypeTrendSignals(matches) {
+  const halves = splitMatchHalves(matches, "Summer");
+  if (!halves) return [];
+  const older = shotTypeTallies(halves.older);
+  const newer = shotTypeTallies(halves.newer);
+  const signals = [];
+  Object.keys(older).forEach((type) => {
+    const o = older[type], n = newer[type];
+    if (!n) return;
+    const oShots = o.saves + o.goals, nShots = n.saves + n.goals;
+    if (oShots < TREND_MIN_SHOTS_PER_HALF || nShots < TREND_MIN_SHOTS_PER_HALF) return;
+    const oPct = Math.round((o.saves / oShots) * 100);
+    const nPct = Math.round((n.saves / nShots) * 100);
+    const delta = nPct - oPct;
+    if (delta <= -TREND_SWING_POINTS) signals.push({ shotType: type, direction: "worse", oldPct: oPct, newPct: nPct });
+    else if (delta >= TREND_SWING_POINTS) signals.push({ shotType: type, direction: "better", oldPct: oPct, newPct: nPct });
+  });
+  return signals;
+}
+
+// Trailing run of consecutive missed sessions (past their implied due date,
+// same createdAt + (weekNumber-1)*7 inference used elsewhere, and still
+// incomplete) at the end of a plan's session order.
+function missedSessionsSignals(plans) {
+  const now = new Date();
+  const signals = [];
+  plans.forEach((p) => {
+    const created = new Date(p.createdAt);
+    const ordered = [];
+    p.weeks.forEach((w) => w.sessions.forEach((s) => {
+      const impliedDate = new Date(created);
+      impliedDate.setDate(impliedDate.getDate() + (w.weekNumber - 1) * 7);
+      ordered.push({ session: s, impliedDate });
+    }));
+    let run = 0;
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const { session, impliedDate } = ordered[i];
+      if (impliedDate > now) continue; // not due yet — doesn't count, doesn't break the run either
+      if (session.completed) break;
+      run++;
+    }
+    if (run >= 2) signals.push({ planId: p.id, planName: p.name, count: run });
+  });
+  return signals;
+}
+
+function rpeHighSignal(plans, adHocSessions) {
+  const all = [
+    ...completedSessionsWithMeta(plans).map(({ session }) => session),
+    ...(adHocSessions || []).filter((s) => s.completed),
+  ].filter((s) => s.rpe && s.completedAt).sort((a, b) => new Date(a.completedAt) - new Date(b.completedAt));
+  const last3 = all.slice(-3);
+  if (last3.length === 3 && last3.every((s) => s.rpe >= 8)) return { lastCompletedAt: last3[2].completedAt };
+  return null;
+}
+
+// weeklyStreak already treats the current, still-in-progress week as "not
+// broken yet" — calling it directly gives the streak as of the last full
+// week, exactly what's "at risk" if this week ends with nothing logged.
+function streakAtRiskSignal(plans) {
+  const now = new Date();
+  const thisWeekKey = weekStartKey(now);
+  const hasThisWeek = completedSessionsWithMeta(plans).some(({ session }) => session.completedAt && weekStartKey(session.completedAt) === thisWeekKey);
+  if (hasThisWeek) return null;
+  const dayIdx = (now.getDay() + 6) % 7; // Monday = 0
+  if (dayIdx < 4) return null; // not late enough yet (before Friday)
+  const priorStreak = weeklyStreak(plans);
+  if (priorStreak < 1) return null;
+  return { weekKey: thisWeekKey, priorStreak };
+}
+
+const NIGGLE_QUIET_DAYS = 10;
+
+function niggleQuietSignals(profile) {
+  const now = new Date();
+  const signals = [];
+  (profile.niggles || []).forEach((n) => {
+    if (n.clearedByPhysio) return;
+    const log = [...(n.rehabLog || [])].sort((a, b) => new Date(b.date) - new Date(a.date));
+    if (log.length === 0) return; // no baseline date to measure quietness from
+    const daysSince = Math.floor((now - new Date(log[0].date)) / (1000 * 60 * 60 * 24));
+    if (daysSince >= NIGGLE_QUIET_DAYS) signals.push({ niggleId: n.id, part: n.part, daysSince, weeksSince: Math.floor(daysSince / 7) });
+  });
+  return signals;
+}
+
+function newPrSignals(plans, exercises) {
+  const signals = [];
+  loggedGymExerciseIds(plans).forEach((id) => {
+    const history = exerciseLogHistory(plans, id);
+    const last = history[history.length - 1];
+    if (last && last.isPr) {
+      const ex = exercises.find((e) => e.id === id);
+      signals.push({ exerciseId: id, exerciseName: ex?.name || "that exercise", sessionCount: history.length });
+    }
+  });
+  return signals;
+}
+
+function completedBlockSignals(plans) {
+  return plans.filter((p) => {
+    const total = p.weeks.reduce((a, w) => a + w.sessions.length, 0);
+    if (total === 0) return false;
+    const done = p.weeks.reduce((a, w) => a + w.sessions.filter((s) => s.completed).length, 0);
+    return done === total;
+  }).map((p) => ({ planId: p.id, planName: p.name }));
+}
+
+// Gathers every currently-true condition, tags each with a fingerprint that
+// only changes when the underlying situation genuinely changes (an escalating
+// count, a new PR, a new week), then returns only the ones not yet seen —
+// this is the actual "don't repeat yourself" mechanism, not a time cooldown.
+function computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises }) {
+  const items = [];
+
+  missedSessionsSignals(plans).forEach((s) => {
+    items.push({ fingerprint: `missed:${s.planId}:${s.count}`, kind: "warning", type: "missed_sessions", data: s });
+  });
+
+  const rpeHigh = rpeHighSignal(plans, adHocSessions);
+  if (rpeHigh) items.push({ fingerprint: `rpe_high:${rpeHigh.lastCompletedAt}`, kind: "warning", type: "rpe_high", data: rpeHigh });
+
+  loggedGymExerciseIds(plans).forEach((id) => {
+    const history = exerciseLogHistory(plans, id);
+    if (isPlateaued(history)) {
+      const ex = exercises.find((e) => e.id === id);
+      items.push({ fingerprint: `plateau:${id}:${history.length}`, kind: "warning", type: "plateau", data: { exerciseId: id, exerciseName: ex?.name || "that lift", sessionCount: history.length } });
+    }
+  });
+
+  zoneTrendSignals(matches, season).forEach((s) => {
+    items.push({ fingerprint: `zone_${s.direction}:${s.zone}:${s.newPct}`, kind: s.direction === "worse" ? "warning" : "positive", type: `zone_${s.direction}`, data: s });
+  });
+  shotTypeTrendSignals(matches).forEach((s) => {
+    items.push({ fingerprint: `shottype_${s.direction}:${s.shotType}:${s.newPct}`, kind: s.direction === "worse" ? "warning" : "positive", type: `shottype_${s.direction}`, data: s });
+  });
+
+  const streakRisk = streakAtRiskSignal(plans);
+  if (streakRisk) items.push({ fingerprint: `streak_risk:${streakRisk.weekKey}`, kind: "warning", type: "streak_risk", data: streakRisk });
+
+  niggleQuietSignals(profile).forEach((s) => {
+    items.push({ fingerprint: `niggle_quiet:${s.niggleId}:${s.weeksSince}`, kind: "warning", type: "niggle_quiet", data: s });
+  });
+
+  newPrSignals(plans, exercises).forEach((s) => {
+    items.push({ fingerprint: `pr:${s.exerciseId}:${s.sessionCount}`, kind: "positive", type: "new_pr", data: s });
+  });
+
+  completedBlockSignals(plans).forEach((s) => {
+    items.push({ fingerprint: `block_done:${s.planId}`, kind: "positive", type: "block_complete", data: s });
+  });
+
+  const seenBadges = new Set(profile.seenBadgeIds || []);
+  computeEarnedBadgeIds(plans, adHocSessions).forEach((id) => {
+    if (!seenBadges.has(id)) {
+      const badge = BADGES.find((b) => b.id === id);
+      items.push({ fingerprint: `badge:${id}`, kind: "positive", type: "badge", data: badge });
+    }
+  });
+
+  const seenFingerprints = new Set(profile.seenAlertFingerprints || []);
+  return items.filter((it) => !seenFingerprints.has(it.fingerprint));
+}
+
+function describeAlertItem(item) {
+  const d = item.data;
+  switch (item.type) {
+    case "missed_sessions": return `Missed ${d.count} sessions in a row in "${d.planName}".`;
+    case "rpe_high": return "The last 3 logged sessions were all RPE 8 or higher.";
+    case "plateau": return `${d.exerciseName} has been flat — no improvement — across the last ${d.sessionCount} logged sessions.`;
+    case "zone_worse": return `${ZONE_LABELS[d.zone]} save% has genuinely dropped recently, from ${d.oldPct}% to ${d.newPct}% — a real trend, not just the usual weak zone.`;
+    case "zone_better": return `${ZONE_LABELS[d.zone]} save% has genuinely improved recently, from ${d.oldPct}% to ${d.newPct}%.`;
+    case "shottype_worse": return `Save% against ${d.shotType} shots has dropped from ${d.oldPct}% to ${d.newPct}% recently.`;
+    case "shottype_better": return `Save% against ${d.shotType} shots has improved from ${d.oldPct}% to ${d.newPct}% recently.`;
+    case "streak_risk": return `Nothing logged yet this week, and it's late in the week — the ${d.priorStreak}-week training streak is at risk of breaking.`;
+    case "niggle_quiet": return `The ${d.part} niggle hasn't had a rehab log entry in ${d.daysSince} days — worth a gentle check-in, not a warning.`;
+    case "new_pr": return `New PR on ${d.exerciseName}.`;
+    case "block_complete": return `Just finished every session in "${d.planName}" — a fully completed block.`;
+    case "badge": return `Just earned the "${d.name}" milestone: ${d.description}`;
+    default: return "";
+  }
+}
+
+/* ---------------------------------------------------------------- */
 /* Small UI atoms                                                    */
 /* ---------------------------------------------------------------- */
 
@@ -1117,6 +1426,11 @@ export default function GKTrainerApp() {
   }, []);
 
   const allExercises = useMemo(() => [...DEFAULT_EXERCISES, ...customExercises], [customExercises]);
+
+  const hasKipAlert = useMemo(() => {
+    if (profile.alertsEnabled === false) return false;
+    return computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises: allExercises }).length > 0;
+  }, [profile, plans, adHocSessions, matches, season, allExercises]);
 
   function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions }) {
     setCustomExercises(nextCustom);
@@ -1266,10 +1580,11 @@ export default function GKTrainerApp() {
             season={season}
             matches={matches}
             exercises={allExercises}
+            adHocSessions={adHocSessions}
           />
         )}
       </div>
-      <BottomNav tab={tab} setTab={setTab} />
+      <BottomNav tab={tab} setTab={setTab} hasKipAlert={hasKipAlert} />
     </div>
   );
 }
@@ -1326,7 +1641,7 @@ function TopBar({ season, setSeason }) {
   );
 }
 
-function BottomNav({ tab, setTab }) {
+function BottomNav({ tab, setTab, hasKipAlert }) {
   const items = [
     { id: "library", label: "Library", Icon: BookOpen },
     { id: "builder", label: "Build", Icon: Plus },
@@ -1347,10 +1662,15 @@ function BottomNav({ tab, setTab }) {
             <button
               key={id}
               onClick={() => setTab(id)}
-              className="flex-1 flex flex-col items-center gap-0.5 py-2 px-0.5 min-w-0"
+              className="flex-1 flex flex-col items-center gap-0.5 py-2 px-0.5 min-w-0 relative"
               style={{ color: active ? "#0E8388" : "#8A8779" }}
             >
-              <Icon size={18} strokeWidth={active ? 2.5 : 2} />
+              <div className="relative">
+                <Icon size={18} strokeWidth={active ? 2.5 : 2} />
+                {id === "kip" && hasKipAlert && (
+                  <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full" style={{ background: "#C1483B" }} />
+                )}
+              </div>
               <span className="text-[9px] font-bold uppercase tracking-wide truncate">{label}</span>
             </button>
           );
@@ -2698,7 +3018,7 @@ function LogSessionModal({ onClose, onSave, focus, gymEntries = [] }) {
 /* Kip                                                                */
 /* ---------------------------------------------------------------- */
 
-function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises }) {
+function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions }) {
   const [editing, setEditing] = useState(!profile.onboarded);
 
   if (editing) {
@@ -2716,12 +3036,14 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
   return (
     <KipChat
       profile={profile}
+      onSaveProfile={onSaveProfile}
       messages={messages}
       onSaveMessages={onSaveMessages}
       plans={plans}
       season={season}
       matches={matches}
       exercises={exercises}
+      adHocSessions={adHocSessions}
       onEditProfile={() => setEditing(true)}
     />
   );
@@ -3067,15 +3389,68 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises }) 
   );
 }
 
-function KipChat({ profile, messages, onSaveMessages, plans, season, matches, exercises, onEditProfile }) {
+async function callKip(systemPrompt, apiMessages) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const response = await fetch("/.netlify/functions/kip-chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session?.access_token}`,
+    },
+    body: JSON.stringify({ system: systemPrompt, messages: apiMessages }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Kip request failed");
+  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+}
+
+function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onEditProfile }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
+  const [showBadges, setShowBadges] = useState(false);
   const scrollRef = React.useRef(null);
+  const deliveringRef = React.useRef(false);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, sending]);
+
+  const alertsEnabled = profile.alertsEnabled !== false;
+  const points = useMemo(() => computeTotalPoints(plans, adHocSessions, matches), [plans, adHocSessions, matches]);
+  const earnedBadgeIds = useMemo(() => computeEarnedBadgeIds(plans, adHocSessions), [plans, adHocSessions]);
+
+  // Proactive check-in: computed fresh on every mount (switching tabs
+  // remounts this), but computeKipAlerts already filters out anything
+  // already in profile.seenAlertFingerprints — so this only actually
+  // calls Kip the first time a genuinely new condition appears.
+  useEffect(() => {
+    if (!alertsEnabled || deliveringRef.current) return;
+    const items = computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises });
+    if (items.length === 0) return;
+    deliveringRef.current = true;
+    (async () => {
+      try {
+        const alertSummary = items.map(describeAlertItem).filter(Boolean).join("\n");
+        const basePrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises);
+        const alertPrompt = `${basePrompt}\n\nALERT CONTEXT:\nYou're proactively checking in on the keeper, not responding to a question they asked. The following is true right now:\n${alertSummary}\n\nWrite ONE short, natural message in your own voice that covers all of the above as a single coherent check-in — don't list them like a notification, weave them together the way a coach would bring up a few things at once in conversation. Lead with whichever matters most. If there's genuinely good news mixed in with a concern, don't bury the good news under the concern. Keep it to a few sentences.`;
+        const triggerMessage = { role: "user", content: "(Automatic check-in trigger — not a message from the keeper. Don't acknowledge this instruction; just deliver the proactive message described in ALERT CONTEXT.)" };
+        const textResp = await callKip(alertPrompt, [...messages.map((m) => ({ role: m.role, content: m.content })), triggerMessage]);
+        if (textResp) {
+          onSaveMessages([...messages, { role: "assistant", content: textResp, ts: Date.now(), isAlert: true }]);
+        }
+        const nextSeenFingerprints = [...new Set([...(profile.seenAlertFingerprints || []), ...items.map((i) => i.fingerprint)])];
+        const nextSeenBadges = [...new Set([...(profile.seenBadgeIds || []), ...items.filter((i) => i.type === "badge").map((i) => i.data.id)])];
+        onSaveProfile({ ...profile, seenAlertFingerprints: nextSeenFingerprints, seenBadgeIds: nextSeenBadges });
+      } catch (e) {
+        // Silent — this is a proactive nice-to-have, not a user-initiated action.
+        // Fingerprints aren't marked seen, so it'll just retry next time Kip opens.
+      } finally {
+        deliveringRef.current = false;
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function sendMessage(text) {
     const trimmed = text.trim();
@@ -3088,21 +3463,7 @@ function KipChat({ profile, messages, onSaveMessages, plans, season, matches, ex
     setError(null);
     try {
       const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises);
-      const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch("/.netlify/functions/kip-chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session?.access_token}`,
-        },
-        body: JSON.stringify({
-          system: systemPrompt,
-          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Kip request failed");
-      const textResp = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      const textResp = await callKip(systemPrompt, nextMessages.map((m) => ({ role: m.role, content: m.content })));
       const assistantMsg = { role: "assistant", content: textResp || "Sorry, I didn't quite get a response there — try again?", ts: Date.now() };
       onSaveMessages([...nextMessages, assistantMsg]);
     } catch (e) {
@@ -3114,13 +3475,28 @@ function KipChat({ profile, messages, onSaveMessages, plans, season, matches, ex
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 190px)" }}>
-      <div className="px-4 pt-3 pb-2 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-1.5">
-          <Sparkles size={15} color="#0E8388" />
-          <span className="text-sm font-black" style={{ color: "#12213A" }}>Kip</span>
-          <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>Beta</span>
+      <div className="px-4 pt-3 pb-2 shrink-0">
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center gap-1.5">
+            <Sparkles size={15} color="#0E8388" />
+            <span className="text-sm font-black" style={{ color: "#12213A" }}>Kip</span>
+            <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>Beta</span>
+          </div>
+          <button onClick={onEditProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Edit profile</button>
         </div>
-        <button onClick={onEditProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Edit profile</button>
+        <div className="flex items-center justify-between">
+          <button onClick={() => setShowBadges(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#8A8779" }}>
+            <Trophy size={12} color="#E2984B" /> {points.total.toLocaleString()} pts
+          </button>
+          <button
+            onClick={() => onSaveProfile({ ...profile, alertsEnabled: !alertsEnabled })}
+            className="flex items-center gap-1 text-[11px] font-semibold"
+            style={{ color: alertsEnabled ? "#0E8388" : "#8A8779" }}
+          >
+            {alertsEnabled ? <Bell size={12} /> : <BellOff size={12} />}
+            {alertsEnabled ? "Alerts on" : "Alerts off"}
+          </button>
+        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 space-y-2.5">
@@ -3185,7 +3561,53 @@ function KipChat({ profile, messages, onSaveMessages, plans, season, matches, ex
           </button>
         </div>
       </div>
+
+      {showBadges && (
+        <BadgesModal points={points} earnedBadgeIds={earnedBadgeIds} onClose={() => setShowBadges(false)} />
+      )}
     </div>
+  );
+}
+
+function BadgesModal({ points, earnedBadgeIds, onClose }) {
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Your progress</h3>
+      <p className="text-xs text-gray-500 mb-4">Points come from completed sessions ({SESSION_POINTS} pts), logged matches ({MATCH_POINTS} pts), and PRs ({PR_POINTS} pts).</p>
+
+      <div className="grid grid-cols-3 gap-2 mb-5">
+        <div className="bg-white rounded-lg border p-2.5 text-center" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-lg font-black" style={{ color: "#12213A" }}>{points.sessionsCompleted}</div>
+          <div className="text-[10px] text-gray-500 font-semibold uppercase">Sessions</div>
+        </div>
+        <div className="bg-white rounded-lg border p-2.5 text-center" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-lg font-black" style={{ color: "#12213A" }}>{points.matchesLogged}</div>
+          <div className="text-[10px] text-gray-500 font-semibold uppercase">Matches</div>
+        </div>
+        <div className="bg-white rounded-lg border p-2.5 text-center" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-lg font-black" style={{ color: "#E2984B" }}>{points.prsHit}</div>
+          <div className="text-[10px] text-gray-500 font-semibold uppercase">PRs</div>
+        </div>
+      </div>
+
+      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Milestones</div>
+      <div className="space-y-2">
+        {BADGES.map((b) => {
+          const earned = earnedBadgeIds.has(b.id);
+          return (
+            <div key={b.id} className="flex items-center gap-3 bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC", opacity: earned ? 1 : 0.5 }}>
+              <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: earned ? "#E2984B" : "#F3F2ED" }}>
+                {earned ? <Trophy size={16} color="#fff" /> : <Lock size={14} color="#8A8779" />}
+              </div>
+              <div>
+                <div className="text-sm font-bold" style={{ color: "#12213A" }}>{b.name}</div>
+                <div className="text-[11px] text-gray-500">{b.description}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Modal>
   );
 }
 
