@@ -5,9 +5,10 @@ import {
   Users, User, ListChecks, BookOpen, ArrowLeft, Circle, CheckCircle2,
   Lightbulb, Eye, ShieldCheck, Zap, Brain, Compass, MessageCircle,
   Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw, Video,
+  ClipboardList, Paperclip, Upload,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
-import { loadUserData, saveUserData } from "./lib/storage.js";
+import { loadUserData, saveUserData, uploadNiggleFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
 import { supabase } from "./lib/supabaseClient.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
 import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
@@ -434,7 +435,13 @@ function buildKipSystemPrompt(profile, plans, season, matches, exercises = []) {
     `Availability: ${profile.sessionsPerWeek || "?"} sessions/week, ~${profile.minutesPerSession || "?"} min each.`,
     `Access: ${Object.entries(profile.access || {}).filter(([, v]) => v).map(([k]) => k).join(", ") || "Not set"}.`,
     `Self-rated weaknesses to prioritise: ${(profile.weaknesses || []).join(", ") || "None flagged"}.`,
-    `Current niggles: ${(profile.niggles || []).length ? profile.niggles.map((n) => `${n.part} (${n.severity}, cleared by physio: ${n.clearedByPhysio ? "yes" : "no"})`).join("; ") : "None reported"}.`,
+    `Current niggles: ${(profile.niggles || []).length ? profile.niggles.map((n) => {
+      const recentLogs = [...(n.rehabLog || [])].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 3);
+      const logSummary = recentLogs.length
+        ? ` — recent rehab log: ${recentLogs.map((l) => `${l.date}: "${l.note}"`).join("; ")}`
+        : "";
+      return `${n.part} (${n.severity}, cleared by physio: ${n.clearedByPhysio ? "yes" : "no"})${logSummary}`;
+    }).join(" | ") : "None reported"}.`,
     "",
     "CURRENT PROGRAM:",
     activePlan
@@ -843,6 +850,30 @@ function weekStartKey(dateLike) {
   return dt.toISOString().slice(0, 10);
 }
 
+function formatShortDate(dateStr) {
+  if (!dateStr) return "";
+  return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// YYYY-MM-DD, matching the plain <input type="date"> convention used
+// throughout the app (Match.date, session.date) — no timezone shifting.
+function dateKey(year, month, day) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+// Monday-start month grid: array of 42 cells (6 weeks), each either a day
+// number or null for the leading/trailing blanks.
+function monthMatrix(year, month) {
+  const first = new Date(year, month, 1);
+  const startOffset = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+  return cells;
+}
+
 function weeklyStreak(plans) {
   const weeksWithSessions = new Set();
   completedSessionsWithMeta(plans).forEach(({ session }) => {
@@ -1046,9 +1077,14 @@ export default function GKTrainerApp() {
   const [season, setSeason] = useState("Winter");
   const [tab, setTab] = useState("library");
   const [saveError, setSaveError] = useState(false);
+  // profile.niggles (incl. rehabLog and files) is injury/rehab data. If a
+  // public-profile sharing feature is ever built, it must construct an
+  // explicit allowlist of shareable fields — never spread or forward this
+  // profile object wholesale. See DECISIONS.md, "Injury/rehab data privacy".
   const [profile, setProfile] = useState({ onboarded: false, access: {}, weaknesses: [], niggles: [] });
   const [kipMessages, setKipMessages] = useState([]);
   const [matches, setMatches] = useState([]);
+  const [adHocSessions, setAdHocSessions] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -1061,6 +1097,7 @@ export default function GKTrainerApp() {
           setProfile(parsed.profile || { onboarded: false, access: {}, weaknesses: [], niggles: [] });
           setKipMessages(parsed.kipMessages || []);
           setMatches(parsed.matches || []);
+          setAdHocSessions(parsed.adHocSessions || []);
         }
       } catch (e) {
         /* no saved data yet */
@@ -1081,14 +1118,15 @@ export default function GKTrainerApp() {
 
   const allExercises = useMemo(() => [...DEFAULT_EXERCISES, ...customExercises], [customExercises]);
 
-  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches }) {
+  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions }) {
     setCustomExercises(nextCustom);
     setPlans(nextPlans);
     setSeason(nextSeason);
     setProfile(nextProfile);
     setKipMessages(nextKip);
     setMatches(nextMatches);
-    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches });
+    setAdHocSessions(nextAdHoc);
+    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc });
   }
 
   function addExercise(ex) {
@@ -1133,6 +1171,31 @@ export default function GKTrainerApp() {
   function deleteMatch(id) {
     const next = matches.filter((m) => m.id !== id);
     updateAndSave({ nextMatches: next });
+  }
+
+  function saveAdHocSession(session) {
+    const exists = adHocSessions.some((s) => s.id === session.id);
+    const next = exists ? adHocSessions.map((s) => (s.id === session.id ? session : s)) : [...adHocSessions, session];
+    updateAndSave({ nextAdHoc: next });
+  }
+
+  function deleteAdHocSession(id) {
+    const next = adHocSessions.filter((s) => s.id !== id);
+    updateAndSave({ nextAdHoc: next });
+  }
+
+  // A plan session's date is a pure calendar overlay — reassigning it never
+  // touches week/session numbering, which stays the structural identity.
+  function setPlanSessionDate(planId, weekId, sessionId, date) {
+    const plan = plans.find((p) => p.id === planId);
+    if (!plan) return;
+    const next = {
+      ...plan,
+      weeks: plan.weeks.map((w) => w.weekId === weekId
+        ? { ...w, sessions: w.sessions.map((s) => (s.sessionId === sessionId ? { ...s, date } : s)) }
+        : w),
+    };
+    savePlan(next);
   }
 
   if (loading) {
@@ -1181,6 +1244,12 @@ export default function GKTrainerApp() {
             exercises={allExercises}
             onSave={savePlan}
             onDelete={deletePlan}
+            onSetSessionDate={setPlanSessionDate}
+            matches={matches}
+            onSaveMatch={saveMatch}
+            adHocSessions={adHocSessions}
+            onSaveAdHoc={saveAdHocSession}
+            onDeleteAdHoc={deleteAdHocSession}
           />
         )}
         {tab === "advice" && <AdviceHub />}
@@ -1870,11 +1939,144 @@ function SessionFocusInput({ value, onSave, className }) {
   );
 }
 
-function Plans({ plans, exercises, onSave, onDelete }) {
+function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSession, onRequestDateChange, onAddTraining, onAddGame, onOpenAdHoc }) {
+  const today = new Date();
+  const todayKey = dateKey(today.getFullYear(), today.getMonth(), today.getDate());
+  const [year, setYear] = useState(today.getFullYear());
+  const [month, setMonth] = useState(today.getMonth());
+  const [selected, setSelected] = useState(todayKey);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+
+  const entriesByDate = useMemo(() => {
+    const map = {};
+    const ensure = (key) => { if (!map[key]) map[key] = { planSessions: [], matches: [], adHoc: [] }; return map[key]; };
+    plans.forEach((plan) => {
+      plan.weeks.forEach((week) => {
+        week.sessions.forEach((session) => {
+          if (!session.date) return;
+          ensure(session.date).planSessions.push({ plan, week, session });
+        });
+      });
+    });
+    matches.forEach((m) => { if (m.date) ensure(m.date).matches.push(m); });
+    adHocSessions.forEach((s) => { if (s.date) ensure(s.date).adHoc.push(s); });
+    return map;
+  }, [plans, matches, adHocSessions]);
+
+  const cells = monthMatrix(year, month);
+  const monthLabel = new Date(year, month, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const dayLabels = ["M", "T", "W", "T", "F", "S", "S"];
+
+  function goMonth(delta) {
+    let m = month + delta, y = year;
+    if (m < 0) { m = 11; y -= 1; }
+    if (m > 11) { m = 0; y += 1; }
+    setMonth(m); setYear(y);
+  }
+
+  const dayEntries = entriesByDate[selected] || { planSessions: [], matches: [], adHoc: [] };
+  const dayHasNothing = dayEntries.planSessions.length === 0 && dayEntries.matches.length === 0 && dayEntries.adHoc.length === 0;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <button onClick={() => goMonth(-1)} className="p-1.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}><ChevronLeft size={14} /></button>
+        <div className="text-sm font-bold" style={{ color: "#12213A" }}>{monthLabel}</div>
+        <button onClick={() => goMonth(1)} className="p-1.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}><ChevronRight size={14} /></button>
+      </div>
+
+      <div className="grid grid-cols-7 gap-1 mb-1">
+        {dayLabels.map((d, i) => <div key={i} className="text-center text-[10px] font-bold text-gray-400">{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-1 mb-3">
+        {cells.map((day, i) => {
+          if (day === null) return <div key={i} />;
+          const key = dateKey(year, month, day);
+          const entries = entriesByDate[key];
+          const isSelected = key === selected;
+          const isToday = key === todayKey;
+          return (
+            <button
+              key={i}
+              onClick={() => setSelected(key)}
+              className="aspect-square rounded-lg flex flex-col items-center justify-center"
+              style={{ background: isSelected ? "#12213A" : "#fff", border: `1px solid ${isToday && !isSelected ? "#0E8388" : "#DAD7CC"}` }}
+            >
+              <span className="text-xs font-semibold" style={{ color: isSelected ? "#fff" : "#12213A" }}>{day}</span>
+              {entries && (
+                <div className="flex gap-0.5 mt-0.5">
+                  {entries.planSessions.length > 0 && <span className="w-1 h-1 rounded-full" style={{ background: isSelected ? "#fff" : "#0E8388" }} />}
+                  {entries.matches.length > 0 && <span className="w-1 h-1 rounded-full" style={{ background: isSelected ? "#fff" : "#C1483B" }} />}
+                  {entries.adHoc.length > 0 && <span className="w-1 h-1 rounded-full" style={{ background: isSelected ? "#fff" : "#E2984B" }} />}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-xs font-bold" style={{ color: "#12213A" }}>{formatShortDate(selected)}</div>
+          <div className="relative">
+            <button onClick={() => setAddMenuOpen(!addMenuOpen)} className="text-[11px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+              <Plus size={12} /> Add
+            </button>
+            {addMenuOpen && (
+              <div className="absolute right-0 top-6 bg-white rounded-lg border shadow-lg z-10 overflow-hidden" style={{ borderColor: "#DAD7CC" }}>
+                <button onClick={() => { setAddMenuOpen(false); onAddTraining(selected); }} className="block w-full text-left px-3 py-2 text-xs font-semibold whitespace-nowrap hover:bg-gray-50">Training session</button>
+                <button onClick={() => { setAddMenuOpen(false); onAddGame(selected); }} className="block w-full text-left px-3 py-2 text-xs font-semibold whitespace-nowrap hover:bg-gray-50">Game</button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {dayHasNothing && <div className="text-[11px] text-gray-400 py-2">Nothing scheduled.</div>}
+
+        <div className="space-y-1.5">
+          {dayEntries.planSessions.map(({ plan, week, session }) => (
+            <div key={session.sessionId} className="rounded-md p-2 border" style={{ borderColor: "#DAD7CC" }}>
+              <button onClick={() => onLogPlanSession(plan, week.weekId, session.sessionId, session.focus)} className="flex items-center gap-1.5 text-xs font-bold w-full text-left">
+                {session.completed ? <CheckCircle2 size={13} color="#0E8388" /> : <Circle size={13} color="#DAD7CC" />}
+                {plan.name} — Week {week.weekNumber}, Session {session.sessionNumber}
+              </button>
+              <button onClick={() => onRequestDateChange(plan, week.weekId, session.sessionId, session.date)} className="text-[10px] font-semibold mt-1" style={{ color: "#8A8779" }}>
+                Change date
+              </button>
+            </div>
+          ))}
+          {dayEntries.matches.map((m) => (
+            <div key={m.id} className="rounded-md p-2 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+              <div className="font-bold" style={{ color: "#12213A" }}>vs {m.opponent}</div>
+              <div className="text-[11px] text-gray-500">{m.result || "Match"}</div>
+            </div>
+          ))}
+          {dayEntries.adHoc.map((s) => (
+            <button key={s.id} onClick={() => onOpenAdHoc(s)} className="w-full text-left rounded-md p-2 border" style={{ borderColor: "#DAD7CC" }}>
+              <div className="flex items-center gap-1.5 text-xs font-bold" style={{ color: "#12213A" }}>
+                {s.completed ? <CheckCircle2 size={13} color="#0E8388" /> : <Circle size={13} color="#DAD7CC" />}
+                {s.title}
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc }) {
+  const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [logTarget, setLogTarget] = useState(null); // { plan, weekId, sessionId }
+  const [dateTarget, setDateTarget] = useState(null); // { plan, weekId, sessionId, current }
+  const [adHocFormTarget, setAdHocFormTarget] = useState(null); // { session } | { date } | null-but-open via boolean below
+  const [showAdHocForm, setShowAdHocForm] = useState(false);
+  const [adHocLogTarget, setAdHocLogTarget] = useState(null); // adHocSession
+  const [confirmDeleteAdHoc, setConfirmDeleteAdHoc] = useState(null);
+  const [matchFormDate, setMatchFormDate] = useState(null); // date string, non-null means "open match form"
 
   const editingPlan = plans.find((p) => p.id === editingId);
   if (editingPlan) {
@@ -1888,22 +2090,47 @@ function Plans({ plans, exercises, onSave, onDelete }) {
     );
   }
 
-  if (plans.length === 0) {
-    return (
-      <div className="px-4 pt-16 text-center">
-        <CalendarRange size={32} color="#DAD7CC" className="mx-auto mb-3" />
-        <div className="text-sm font-bold" style={{ color: "#12213A" }}>No blocks yet</div>
-        <div className="text-xs text-gray-500 mt-1">Head to Build to create your first 6-week block.</div>
-      </div>
-    );
-  }
-
   const streak = weeklyStreak(plans);
   const next = nextSuggestedSession(plans);
   const trend = rpeTrend(plans);
 
   return (
     <div className="px-4 pt-4 pb-6 space-y-3">
+      <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: "#DAD7CC" }}>
+        {[["list", "List"], ["calendar", "Calendar"]].map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className="flex-1 py-2 text-xs font-bold uppercase tracking-wide"
+            style={view === id ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === "calendar" ? (
+        <CalendarView
+          plans={plans}
+          matches={matches}
+          adHocSessions={adHocSessions}
+          exercises={exercises}
+          onLogPlanSession={(plan, weekId, sessionId, focus) => setLogTarget({ plan, weekId, sessionId, focus })}
+          onRequestDateChange={(plan, weekId, sessionId, current) => setDateTarget({ plan, weekId, sessionId, current })}
+          onAddTraining={(date) => { setAdHocFormTarget({ date }); setShowAdHocForm(true); }}
+          onAddGame={(date) => setMatchFormDate(date)}
+          onOpenAdHoc={(session) => setAdHocLogTarget(session)}
+        />
+      ) : (
+        <>
+      {plans.length === 0 && adHocSessions.length === 0 && (
+        <div className="pt-8 text-center">
+          <CalendarRange size={32} color="#DAD7CC" className="mx-auto mb-3" />
+          <div className="text-sm font-bold" style={{ color: "#12213A" }}>No blocks yet</div>
+          <div className="text-xs text-gray-500 mt-1">Head to Build to create your first 6-week block, or switch to Calendar to add a one-off session.</div>
+        </div>
+      )}
+
       {streak > 0 && (
         <div className="flex items-center gap-1.5 text-xs font-bold" style={{ color: "#12213A" }}>
           <Flame size={14} color="#E2984B" /> {streak}-week streak
@@ -2022,6 +2249,14 @@ function Plans({ plans, exercises, onSave, onDelete }) {
                               </span>
                             )}
                           </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDateTarget({ plan: p, weekId: w.weekId, sessionId: s.sessionId, current: s.date || "" }); }}
+                            className="flex items-center gap-1 text-[10px] font-semibold mb-1"
+                            style={{ color: s.date ? "#0E8388" : "#8A8779" }}
+                          >
+                            <CalendarRange size={11} />
+                            {s.date ? formatShortDate(s.date) : "Set date"}
+                          </button>
                           {!s.completed && (
                             <SessionFocusInput
                               value={s.focus || ""}
@@ -2085,6 +2320,30 @@ function Plans({ plans, exercises, onSave, onDelete }) {
         </Modal>
       )}
 
+      <div className="flex items-center justify-between mt-2">
+        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400">One-off sessions</div>
+        <button onClick={() => { setAdHocFormTarget({ date: new Date().toISOString().slice(0, 10) }); setShowAdHocForm(true); }} className="text-[11px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+          <Plus size={12} /> Add
+        </button>
+      </div>
+      {adHocSessions.length === 0 && <div className="text-[11px] text-gray-400 pb-2">No one-off sessions yet.</div>}
+      <div className="space-y-1.5">
+        {[...adHocSessions].sort((a, b) => new Date(a.date) - new Date(b.date)).map((s) => (
+          <button key={s.id} onClick={() => setAdHocLogTarget(s)} className="w-full text-left bg-white rounded-lg border p-2.5 flex items-center justify-between" style={{ borderColor: "#DAD7CC" }}>
+            <div className="flex items-center gap-2">
+              {s.completed ? <CheckCircle2 size={14} color="#0E8388" /> : <Circle size={14} color="#DAD7CC" />}
+              <div>
+                <div className="text-xs font-bold" style={{ color: "#12213A" }}>{s.title}</div>
+                <div className="text-[10px] text-gray-400">{formatShortDate(s.date)}{s.completed && s.rpe ? ` · RPE ${s.rpe}` : ""}</div>
+              </div>
+            </div>
+            <ChevronRight size={14} color="#DAD7CC" />
+          </button>
+        ))}
+      </div>
+      </>
+      )}
+
       {logTarget && (() => {
         const logWeek = logTarget.plan.weeks.find((ww) => ww.weekId === logTarget.weekId);
         const logSession = logWeek?.sessions.find((ss) => ss.sessionId === logTarget.sessionId);
@@ -2117,6 +2376,83 @@ function Plans({ plans, exercises, onSave, onDelete }) {
           />
         );
       })()}
+
+      {dateTarget && (
+        <Modal onClose={() => setDateTarget(null)}>
+          <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>Set session date</h3>
+          <SetDateForm
+            value={dateTarget.current}
+            onCancel={() => setDateTarget(null)}
+            onSave={(date) => {
+              onSetSessionDate(dateTarget.plan.id, dateTarget.weekId, dateTarget.sessionId, date || null);
+              setDateTarget(null);
+            }}
+          />
+        </Modal>
+      )}
+
+      {showAdHocForm && (
+        <AdHocSessionFormModal
+          exercises={exercises}
+          initialDate={adHocFormTarget?.date}
+          onClose={() => { setShowAdHocForm(false); setAdHocFormTarget(null); }}
+          onSave={(session) => {
+            onSaveAdHoc(session);
+            setShowAdHocForm(false);
+            setAdHocFormTarget(null);
+          }}
+        />
+      )}
+
+      {adHocLogTarget && (
+        <AdHocSessionDetailModal
+          session={adHocLogTarget}
+          exercises={exercises}
+          onClose={() => setAdHocLogTarget(null)}
+          onSave={(session) => { onSaveAdHoc(session); setAdHocLogTarget(null); }}
+          onDelete={() => { setConfirmDeleteAdHoc(adHocLogTarget.id); }}
+        />
+      )}
+
+      {confirmDeleteAdHoc && (
+        <Modal onClose={() => setConfirmDeleteAdHoc(null)}>
+          <h3 className="text-base font-black mb-2">Delete this session?</h3>
+          <p className="text-sm text-gray-600 mb-4">This can't be undone.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmDeleteAdHoc(null)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Cancel</button>
+            <button onClick={() => { onDeleteAdHoc(confirmDeleteAdHoc); setConfirmDeleteAdHoc(null); setAdHocLogTarget(null); }} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Delete</button>
+          </div>
+        </Modal>
+      )}
+
+      {matchFormDate && (
+        <MatchFormModal
+          season={plans[0]?.season || "Winter"}
+          matches={matches}
+          initialDate={matchFormDate}
+          onClose={() => setMatchFormDate(null)}
+          onSave={(m) => { onSaveMatch(m); setMatchFormDate(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function SetDateForm({ value, onCancel, onSave }) {
+  const [date, setDate] = useState(value || "");
+  return (
+    <div>
+      <input type="date" className="input mb-4" value={date} onChange={(e) => setDate(e.target.value)} />
+      <div className="flex gap-2">
+        {value && (
+          <button onClick={() => onSave(null)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ color: "#C1483B", borderColor: "#C1483B33" }}>
+            Clear date
+          </button>
+        )}
+        <button onClick={onCancel} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Cancel</button>
+        <button disabled={!date} onClick={() => onSave(date)} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>Save</button>
+      </div>
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
     </div>
   );
 }
@@ -2178,6 +2514,123 @@ function GymSetLogger({ exerciseName, sets, onChange }) {
         <Plus size={12} /> Add set
       </button>
     </div>
+  );
+}
+
+// Standalone session not tied to any 6-week block. Deliberately lighter
+// than a plan session — exercises are plain links for reference, no
+// per-set gym logging, since that data has nowhere to feed (progress
+// graphs and Kip's gym-performance section only read plan history).
+function AdHocSessionFormModal({ exercises, initialDate, onClose, onSave }) {
+  const [title, setTitle] = useState("");
+  const [notes, setNotes] = useState("");
+  const [date, setDate] = useState(initialDate || new Date().toISOString().slice(0, 10));
+  const [exerciseIds, setExerciseIds] = useState([]);
+  const [picker, setPicker] = useState(false);
+  const valid = title.trim() && date;
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>New one-off session</h3>
+      <div className="space-y-3">
+        <Field label="Title">
+          <input className="input" placeholder="e.g. Extra reflex work" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </Field>
+        <Field label="Date">
+          <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Notes (optional)">
+          <textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What's the plan?" />
+        </Field>
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400">Exercises (optional)</div>
+            <button onClick={() => setPicker(true)} className="text-[11px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+              <Plus size={12} /> Add
+            </button>
+          </div>
+          {exerciseIds.length === 0 && <div className="text-[11px] text-gray-400">None linked</div>}
+          <div className="space-y-1">
+            {exerciseIds.map((id) => {
+              const ex = exercises.find((e) => e.id === id);
+              if (!ex) return null;
+              return (
+                <div key={id} className="flex items-center justify-between bg-white rounded-md px-2 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+                  {ex.name}
+                  <button onClick={() => setExerciseIds(exerciseIds.filter((x) => x !== id))}><X size={13} color="#C1483B" /></button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <button
+          disabled={!valid}
+          onClick={() => onSave({ id: uid(), title: title.trim(), notes: notes.trim(), date, exerciseIds, completed: false, rpe: null, note: "", completedAt: null })}
+          className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
+          style={{ background: "#0E8388" }}
+        >
+          Create session
+        </button>
+      </div>
+      {picker && (
+        <ExercisePickerModal
+          exercises={exercises}
+          onClose={() => setPicker(false)}
+          onPick={(ex) => { setExerciseIds([...exerciseIds, ex.id]); setPicker(false); }}
+        />
+      )}
+    </Modal>
+  );
+}
+
+function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete }) {
+  const [logging, setLogging] = useState(false);
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>{session.title}</h3>
+      <div className="text-xs text-gray-500 mb-3">{formatShortDate(session.date)}</div>
+      {session.notes && <p className="text-sm text-gray-700 mb-3">{session.notes}</p>}
+      {session.exerciseIds && session.exerciseIds.length > 0 && (
+        <div className="space-y-1 mb-3">
+          {session.exerciseIds.map((id) => {
+            const ex = exercises.find((e) => e.id === id);
+            if (!ex) return null;
+            return <div key={id} className="text-xs text-gray-600 bg-white rounded-md px-2 py-1.5 border" style={{ borderColor: "#DAD7CC" }}>{ex.name}</div>;
+          })}
+        </div>
+      )}
+      {session.completed && (
+        <div className="bg-white rounded-lg border p-3 mb-3" style={{ borderColor: "#DAD7CC" }}>
+          <div className="flex items-center gap-1.5 text-xs font-bold mb-1" style={{ color: "#0E8388" }}>
+            <CheckCircle2 size={14} /> Completed{session.rpe ? ` — RPE ${session.rpe}` : ""}
+          </div>
+          {session.note && <div className="text-xs text-gray-500 italic">"{session.note}"</div>}
+        </div>
+      )}
+      <div className="flex gap-2">
+        {!session.completed ? (
+          <button onClick={() => setLogging(true)} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+            Log this session
+          </button>
+        ) : (
+          <button onClick={() => onSave({ ...session, completed: false })} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
+            Mark incomplete
+          </button>
+        )}
+        <button onClick={onDelete} className="py-2.5 px-3 rounded-lg text-sm font-bold" style={{ color: "#C1483B", border: "1px solid #C1483B33" }}>
+          <Trash2 size={14} />
+        </button>
+      </div>
+      {logging && (
+        <LogSessionModal
+          onClose={() => setLogging(false)}
+          onSave={({ rpe, note }) => {
+            onSave({ ...session, completed: true, rpe, note, completedAt: new Date().toISOString() });
+            setLogging(false);
+          }}
+        />
+      )}
+    </Modal>
   );
 }
 
@@ -2254,6 +2707,8 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
         profile={profile}
         onSave={(p) => { onSaveProfile(p); setEditing(false); }}
         onCancel={profile.onboarded ? () => setEditing(false) : null}
+        onSaveProfile={onSaveProfile}
+        exercises={exercises}
       />
     );
   }
@@ -2272,7 +2727,162 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
   );
 }
 
-function KipOnboarding({ profile, onSave, onCancel }) {
+function NiggleDetailModal({ niggle, exercises, onClose, onSave }) {
+  const [addingLog, setAddingLog] = useState(false);
+  const [logDate, setLogDate] = useState(new Date().toISOString().slice(0, 10));
+  const [logNote, setLogNote] = useState("");
+  const [logExerciseIds, setLogExerciseIds] = useState([]);
+  const [picker, setPicker] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [fileError, setFileError] = useState(null);
+  const fileInputRef = React.useRef(null);
+
+  const rehabLog = niggle.rehabLog || [];
+  const files = niggle.files || [];
+
+  function addLogEntry() {
+    if (!logNote.trim()) return;
+    const entry = { id: uid(), date: logDate, note: logNote.trim(), exerciseIds: logExerciseIds };
+    onSave({ ...niggle, rehabLog: [...rehabLog, entry] });
+    setLogNote("");
+    setLogExerciseIds([]);
+    setAddingLog(false);
+  }
+
+  function removeLogEntry(id) {
+    onSave({ ...niggle, rehabLog: rehabLog.filter((e) => e.id !== id) });
+  }
+
+  async function handleFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setFileError(null);
+    try {
+      const meta = await uploadNiggleFile(niggle.id, file);
+      onSave({ ...niggle, files: [...files, meta] });
+    } catch (err) {
+      setFileError(err.message || "Upload failed");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function viewFile(path) {
+    try {
+      const url = await getSignedNiggleFileUrl(path);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      setFileError("Couldn't open file");
+    }
+  }
+
+  async function removeFile(f) {
+    try {
+      await deleteNiggleFile(f.path);
+      onSave({ ...niggle, files: files.filter((x) => x.path !== f.path) });
+    } catch (err) {
+      setFileError("Couldn't delete file");
+    }
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>{niggle.part || "Niggle"}</h3>
+      <div className="text-xs text-gray-500 mb-4">{niggle.severity} · {niggle.clearedByPhysio ? "Cleared by physio" : "Not yet cleared"}</div>
+
+      <div className="mb-5">
+        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">PT / physio files</div>
+        <div className="space-y-1.5 mb-2">
+          {files.map((f) => (
+            <div key={f.path} className="flex items-center justify-between bg-white rounded-md px-2.5 py-2 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+              <button onClick={() => viewFile(f.path)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left" style={{ color: "#0E8388" }}>
+                <Paperclip size={12} className="shrink-0" />
+                <span className="truncate font-semibold">{f.name}</span>
+              </button>
+              <button onClick={() => removeFile(f)}><X size={13} color="#C1483B" /></button>
+            </div>
+          ))}
+          {files.length === 0 && <div className="text-[11px] text-gray-400">No files attached.</div>}
+        </div>
+        <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
+          <Upload size={13} /> {uploading ? "Uploading…" : "Upload PDF or image"}
+          <input ref={fileInputRef} type="file" accept="application/pdf,image/*" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+        </label>
+        {fileError && <div className="text-[11px] mt-1" style={{ color: "#C1483B" }}>{fileError}</div>}
+        <p className="text-[10px] text-gray-400 mt-1.5">Stored privately — only you can access these. Not parsed or scheduled automatically; create a one-off session yourself if you want to work from what's here.</p>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400">Rehab log</div>
+          <button onClick={() => setAddingLog(!addingLog)} className="text-[11px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+            <Plus size={12} /> Add entry
+          </button>
+        </div>
+        {addingLog && (
+          <div className="bg-white rounded-lg border p-2.5 mb-2" style={{ borderColor: "#DAD7CC" }}>
+            <input type="date" className="input mb-2 text-xs" value={logDate} onChange={(e) => setLogDate(e.target.value)} />
+            <textarea className="input text-xs mb-2" rows={2} placeholder="How's it feeling? What did you do today?" value={logNote} onChange={(e) => setLogNote(e.target.value)} />
+            <div className="mb-2">
+              <div className="flex items-center justify-between mb-1">
+                <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Exercises done (optional)</div>
+                <button onClick={() => setPicker(true)} className="text-[10px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
+                  <Plus size={10} /> Add
+                </button>
+              </div>
+              {logExerciseIds.length > 0 && (
+                <div className="space-y-1">
+                  {logExerciseIds.map((id) => {
+                    const ex = exercises.find((e) => e.id === id);
+                    if (!ex) return null;
+                    return (
+                      <div key={id} className="flex items-center justify-between bg-white rounded-md px-2 py-1 border text-[11px]" style={{ borderColor: "#DAD7CC" }}>
+                        {ex.name}
+                        <button onClick={() => setLogExerciseIds(logExerciseIds.filter((x) => x !== id))}><X size={11} color="#C1483B" /></button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <button disabled={!logNote.trim()} onClick={addLogEntry} className="w-full py-2 rounded-lg text-xs font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>Save entry</button>
+          </div>
+        )}
+        <div className="space-y-1.5">
+          {[...rehabLog].sort((a, b) => new Date(b.date) - new Date(a.date)).map((entry) => (
+            <div key={entry.id} className="bg-white rounded-md px-2.5 py-2 border" style={{ borderColor: "#DAD7CC" }}>
+              <div className="flex items-center justify-between mb-0.5">
+                <div className="text-[11px] font-bold" style={{ color: "#12213A" }}>{formatShortDate(entry.date)}</div>
+                <button onClick={() => removeLogEntry(entry.id)}><X size={12} color="#C1483B" /></button>
+              </div>
+              <div className="text-xs text-gray-600">{entry.note}</div>
+              {entry.exerciseIds && entry.exerciseIds.length > 0 && (
+                <div className="text-[10px] text-gray-400 mt-0.5">
+                  {entry.exerciseIds.map((id) => exercises.find((e) => e.id === id)?.name).filter(Boolean).join(", ")}
+                </div>
+              )}
+            </div>
+          ))}
+          {rehabLog.length === 0 && <div className="text-[11px] text-gray-400">No entries yet.</div>}
+        </div>
+      </div>
+
+      {picker && (
+        <ExercisePickerModal
+          exercises={exercises}
+          onClose={() => setPicker(false)}
+          onPick={(ex) => { setLogExerciseIds([...logExerciseIds, ex.id]); setPicker(false); }}
+        />
+      )}
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+    </Modal>
+  );
+}
+
+function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises }) {
+  const [niggleDetailId, setNiggleDetailId] = useState(null);
   const [form, setForm] = useState({
     level: profile.level || "",
     discipline: profile.discipline || "",
@@ -2302,6 +2912,18 @@ function KipOnboarding({ profile, onSave, onCancel }) {
   }
   function removeNiggle(id) {
     setForm({ ...form, niggles: form.niggles.filter((n) => n.id !== id) });
+  }
+
+  // Rehab log entries and file uploads/deletes save immediately (same
+  // pattern as session RPE/note logging elsewhere), bypassing the rest of
+  // this form's batched submit — otherwise a cancelled onboarding edit
+  // could silently drop a logged rehab entry or orphan an uploaded file
+  // reference. Keeps local form.niggles in sync too, so a later full save
+  // here never overwrites it with stale data.
+  function saveNiggleImmediately(updatedNiggle) {
+    const nextNiggles = form.niggles.map((n) => (n.id === updatedNiggle.id ? updatedNiggle : n));
+    setForm({ ...form, niggles: nextNiggles });
+    onSaveProfile({ ...form, niggles: nextNiggles, onboarded: profile.onboarded });
   }
 
   const valid = form.level && form.discipline;
@@ -2408,10 +3030,23 @@ function KipOnboarding({ profile, onSave, onCancel }) {
                   Cleared by physio
                 </label>
               </div>
+              <button onClick={() => setNiggleDetailId(n.id)} className="text-[10px] font-bold mt-2 flex items-center gap-1" style={{ color: "#0E8388" }}>
+                <ClipboardList size={11} /> Rehab log & files
+                {n.rehabLog && n.rehabLog.length > 0 && ` (${n.rehabLog.length})`}
+              </button>
             </div>
           ))}
         </div>
       </div>
+
+      {niggleDetailId && (
+        <NiggleDetailModal
+          niggle={form.niggles.find((n) => n.id === niggleDetailId)}
+          exercises={exercises}
+          onClose={() => setNiggleDetailId(null)}
+          onSave={saveNiggleImmediately}
+        />
+      )}
 
       <div className="grid grid-cols-3 gap-3 mt-3">
         <Field label="Height (cm)"><input className="input" value={form.heightCm} onChange={(e) => setForm({ ...form, heightCm: e.target.value })} /></Field>
@@ -2720,8 +3355,8 @@ function OpponentHistoryNote({ matches, opponent, excludeId }) {
   );
 }
 
-function MatchFormModal({ season, matches, onClose, onSave }) {
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "" });
+function MatchFormModal({ season, matches, onClose, onSave, initialDate }) {
+  const [form, setForm] = useState({ date: initialDate || new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "" });
   const valid = form.date && form.opponent.trim();
   return (
     <Modal onClose={onClose}>
