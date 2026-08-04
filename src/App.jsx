@@ -1585,9 +1585,6 @@ export default function GKTrainerApp() {
   // public-profile sharing feature is ever built, it must never be included
   // in whatever gets shared. See DECISIONS.md, "Injury/rehab data privacy".
   const [generalUploads, setGeneralUploads] = useState([]);
-  // Uploads screen is a full-screen overlay reachable from Kip's profile
-  // area, not a bottom-nav tab — this just toggles it, independent of `tab`.
-  const [showUploads, setShowUploads] = useState(false);
   // Which live recorder overlay is currently shown (null = none). Lifted to
   // App level, not owned by Plans/Stats/Record individually, so starting a
   // recording from any one of them is immediately visible/resumable from the
@@ -1794,19 +1791,7 @@ export default function GKTrainerApp() {
         </div>
       )}
       <div className="flex-1 overflow-y-auto pb-20 max-w-md w-full mx-auto">
-        {showUploads && (
-          <UploadsScreen
-            profile={profile}
-            onSaveProfile={saveProfile}
-            generalUploads={generalUploads}
-            onAddGeneralUpload={addGeneralUpload}
-            onRemoveGeneralUpload={removeGeneralUpload}
-            plans={plans}
-            onApplyPtPlan={applyPtPlanToBlock}
-            onBack={() => setShowUploads(false)}
-          />
-        )}
-        {!showUploads && tab === "library" && (
+        {tab === "library" && (
           <Library
             exercises={allExercises}
             season={season}
@@ -1814,7 +1799,7 @@ export default function GKTrainerApp() {
             onDelete={deleteExercise}
           />
         )}
-        {!showUploads && tab === "plans" && (
+        {tab === "plans" && (
           <Plans
             plans={plans}
             exercises={allExercises}
@@ -1833,7 +1818,7 @@ export default function GKTrainerApp() {
             onOpenLiveRecorder={setActiveLiveTarget}
           />
         )}
-        {!showUploads && tab === "record" && (
+        {tab === "record" && (
           <RecordTab
             plans={plans}
             adHocSessions={adHocSessions}
@@ -1848,8 +1833,19 @@ export default function GKTrainerApp() {
             onOpenLiveRecorder={setActiveLiveTarget}
           />
         )}
-        {!showUploads && tab === "advice" && <AdviceHub />}
-        {!showUploads && tab === "stats" && (
+        {tab === "profile" && (
+          <ProfileTab
+            profile={profile}
+            onSaveProfile={saveProfile}
+            exercises={allExercises}
+            plans={plans}
+            onApplyPtPlan={applyPtPlanToBlock}
+            generalUploads={generalUploads}
+            onAddGeneralUpload={addGeneralUpload}
+            onRemoveGeneralUpload={removeGeneralUpload}
+          />
+        )}
+        {tab === "stats" && (
           <StatsTab
             matches={matches}
             season={season}
@@ -1863,7 +1859,7 @@ export default function GKTrainerApp() {
             onOpenLiveRecorder={setActiveLiveTarget}
           />
         )}
-        {!showUploads && tab === "kip" && (
+        {tab === "kip" && (
           <KipTab
             profile={profile}
             onSaveProfile={saveProfile}
@@ -1875,7 +1871,7 @@ export default function GKTrainerApp() {
             exercises={allExercises}
             adHocSessions={adHocSessions}
             onApplyPtPlan={applyPtPlanToBlock}
-            onOpenUploads={() => setShowUploads(true)}
+            onOpenProfile={() => setTab("profile")}
           />
         )}
       </div>
@@ -1974,7 +1970,7 @@ export default function GKTrainerApp() {
         );
       })()}
 
-      <BottomNav tab={tab} setTab={(id) => { setShowUploads(false); setTab(id); }} hasKipAlert={hasKipAlert} />
+      <BottomNav tab={tab} setTab={setTab} hasKipAlert={hasKipAlert} />
     </div>
   );
 }
@@ -2036,7 +2032,7 @@ function BottomNav({ tab, setTab, hasKipAlert }) {
     { id: "library", label: "Library", Icon: BookOpen },
     { id: "record", label: "Record", Icon: Circle },
     { id: "plans", label: "Plans", Icon: ListChecks },
-    { id: "advice", label: "Advice", Icon: Lightbulb },
+    { id: "profile", label: "Profile", Icon: User },
     { id: "stats", label: "Stats", Icon: BarChart3 },
     { id: "kip", label: "Kip", Icon: Sparkles },
   ];
@@ -2075,6 +2071,7 @@ function BottomNav({ tab, setTab, hasKipAlert }) {
 /* ---------------------------------------------------------------- */
 
 function Library({ exercises, season, onAdd, onDelete }) {
+  const [view, setView] = useState("exercises"); // exercises | notes
   const [q, setQ] = useState("");
   const [cat, setCat] = useState(null);
   const [type, setType] = useState(null);
@@ -2092,6 +2089,23 @@ function Library({ exercises, season, onAdd, onDelete }) {
 
   return (
     <div className="px-4 pt-4">
+      <div className="flex rounded-lg overflow-hidden border mb-3" style={{ borderColor: "#DAD7CC" }}>
+        {[["exercises", "Exercises"], ["notes", "Coach's Notes"]].map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className="flex-1 py-2 text-xs font-bold uppercase tracking-wide"
+            style={view === id ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {view === "notes" && <AdviceHub />}
+
+      {view === "exercises" && (
+        <>
       <div className="flex items-center gap-2 mb-3">
         <div className="flex-1 flex items-center gap-2 bg-white rounded-lg px-3 py-2 border" style={{ borderColor: "#DAD7CC" }}>
           <Search size={16} color="#8A8779" />
@@ -2160,6 +2174,8 @@ function Library({ exercises, season, onAdd, onDelete }) {
         />
       )}
       {showAdd && <AddExerciseModal onClose={() => setShowAdd(false)} onSave={(ex) => { onAdd(ex); setShowAdd(false); }} />}
+        </>
+      )}
     </div>
   );
 }
@@ -3823,7 +3839,7 @@ function LogSessionModal({ onClose, onSave, focus, gymEntries = [] }) {
 /* Kip                                                                */
 /* ---------------------------------------------------------------- */
 
-function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onApplyPtPlan, onOpenUploads }) {
+function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onApplyPtPlan, onOpenProfile }) {
   const [editing, setEditing] = useState(!profile.onboarded);
 
   if (editing) {
@@ -3851,8 +3867,7 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
       matches={matches}
       exercises={exercises}
       adHocSessions={adHocSessions}
-      onEditProfile={() => setEditing(true)}
-      onOpenUploads={onOpenUploads}
+      onOpenProfile={onOpenProfile}
     />
   );
 }
@@ -4313,6 +4328,50 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
   );
 }
 
+// The actual home for the profile form and Uploads — both previously only
+// reachable via links buried inside Kip chat. Uploads is a local toggle
+// (mirroring Plans' own showBuilder pattern) rather than an App-level
+// overlay, since it's now scoped to this tab rather than floating above all
+// of them. onCancel is deliberately omitted from KipOnboarding here: there's
+// no other screen to cancel back to, Profile IS the destination.
+function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload }) {
+  const [showUploads, setShowUploads] = useState(false);
+
+  if (showUploads) {
+    return (
+      <UploadsScreen
+        profile={profile}
+        onSaveProfile={onSaveProfile}
+        generalUploads={generalUploads}
+        onAddGeneralUpload={onAddGeneralUpload}
+        onRemoveGeneralUpload={onRemoveGeneralUpload}
+        plans={plans}
+        onApplyPtPlan={onApplyPtPlan}
+        onBack={() => setShowUploads(false)}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div className="px-4 pt-4 flex justify-end">
+        <button onClick={() => setShowUploads(true)} className="flex items-center gap-1 text-[11px] font-semibold" style={{ color: "#0E8388" }}>
+          <Paperclip size={12} /> Uploads
+        </button>
+      </div>
+      <KipOnboarding
+        profile={profile}
+        onSave={onSaveProfile}
+        onCancel={null}
+        onSaveProfile={onSaveProfile}
+        exercises={exercises}
+        plans={plans}
+        onApplyPtPlan={onApplyPtPlan}
+      />
+    </div>
+  );
+}
+
 function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, plans, onApplyPtPlan }) {
   const [niggleDetailId, setNiggleDetailId] = useState(null);
   const [form, setForm] = useState({
@@ -4493,7 +4552,7 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, pl
           <button onClick={onCancel} className="flex-1 py-3 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Cancel</button>
         )}
         <button disabled={!valid} onClick={() => onSave({ ...form, onboarded: true })} className="flex-1 py-3 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
-          {onCancel ? "Save changes" : "Start chatting with Kip"}
+          {profile.onboarded ? "Save changes" : "Start chatting with Kip"}
         </button>
       </div>
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
@@ -4574,7 +4633,7 @@ async function extractPtPlanFromFile(file) {
   }
 }
 
-function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onEditProfile, onOpenUploads }) {
+function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onOpenProfile }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
@@ -4652,11 +4711,7 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
             <span className="text-sm font-black" style={{ color: "#12213A" }}>Kip</span>
             <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>Beta</span>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={onOpenUploads} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Uploads</button>
-            <span className="text-[11px] text-gray-300">·</span>
-            <button onClick={onEditProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Edit profile</button>
-          </div>
+          <button onClick={onOpenProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Profile</button>
         </div>
         <div className="flex items-center justify-between">
           <button onClick={() => setShowBadges(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#8A8779" }}>
@@ -4785,11 +4840,13 @@ function BadgesModal({ points, earnedBadgeIds, onClose }) {
   );
 }
 
+// Header-less by design — the only caller is Library's "Coach's notes"
+// segment, whose segmented control already labels this content; a second
+// title here would just repeat it.
 function AdviceHub() {
   const [openId, setOpenId] = useState(ADVICE_TOPICS[0].id);
   return (
     <div className="px-4 pt-4 pb-6">
-      <h2 className="text-lg font-black mb-1" style={{ color: "#12213A" }}>Coach's notes</h2>
       <p className="text-xs text-gray-500 mb-4">
         Short, practical principles behind the exercises — the "why" to go with the "what".
       </p>
