@@ -8,7 +8,7 @@ import {
   ClipboardList, Paperclip, Upload, Trophy, Bell, BellOff, Lock,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
-import { loadUserData, saveUserData, uploadNiggleFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
+import { loadUserData, saveUserData, uploadNiggleFile, uploadGeneralFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
 import { supabase } from "./lib/supabaseClient.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
 import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
@@ -875,6 +875,36 @@ function generateFreeformBlock(name, season, sessionsPerWeek) {
   };
 }
 
+// Rehab blocks are their own kind — distinct from goal-based/freeform —
+// since a rehab progression is time-boxed and manually assembled from a
+// confirmed physio plan, not generated or weighted by Keepr. `buildEntries`
+// is called fresh per session so each session gets its own entryIds rather
+// than sharing references.
+function generateRehabBlock(name, season, weekCount, sessionsPerWeek, buildEntries) {
+  const weeks = Array.from({ length: weekCount }).map((_, wIdx) => ({
+    weekId: uid(),
+    weekNumber: wIdx + 1,
+    focus: "",
+    sessions: Array.from({ length: sessionsPerWeek }).map((_, sIdx) => ({
+      sessionId: uid(),
+      sessionNumber: sIdx + 1,
+      exercises: buildEntries(),
+      completed: false,
+      focus: "",
+    })),
+  }));
+  return {
+    id: uid(),
+    name: name || "Rehab Plan",
+    season,
+    goal: null,
+    method: "rehab",
+    blockType: "rehab",
+    createdAt: new Date().toISOString(),
+    weeks,
+  };
+}
+
 function completedSessionsWithMeta(plans) {
   const out = [];
   plans.forEach((p) => {
@@ -1529,6 +1559,11 @@ const typeIcon = { Solo: User, Partner: Users, Team: Users, Gym: Dumbbell };
 export default function GKTrainerApp() {
   const [loading, setLoading] = useState(true);
   const [customExercises, setCustomExercises] = useState([]);
+  // Most plans are ordinary training blocks, but a `blockType: "rehab"` plan
+  // is assembled directly from a niggle's uploaded PT/physio file — the same
+  // injury/rehab privacy rule below applies to those specific plans, not
+  // just to profile.niggles/generalUploads themselves. A future sharing
+  // allowlist must filter plans by blockType, not just spread this array.
   const [plans, setPlans] = useState([]);
   const [season, setSeason] = useState("Winter");
   const [tab, setTab] = useState("library");
@@ -1544,10 +1579,23 @@ export default function GKTrainerApp() {
   // Opponent-team-level rosters — keyed by normalized name, shared across
   // every match against that team rather than living on any single match.
   const [opponents, setOpponents] = useState([]);
-  // One-shot seed for auto-resuming into a live recorder right after app
-  // load — never set again afterward, so normal tab navigation later still
-  // shows the ordinary "Resume recording" prompt rather than force-opening it.
-  const [resumeTarget, setResumeTarget] = useState(null);
+  // Uploaded files not linked to any specific niggle — same shape and same
+  // private-bucket storage as niggle.files, just not attached to one entity.
+  // Like profile.niggles, this is injury/rehab-adjacent data: if a
+  // public-profile sharing feature is ever built, it must never be included
+  // in whatever gets shared. See DECISIONS.md, "Injury/rehab data privacy".
+  const [generalUploads, setGeneralUploads] = useState([]);
+  // Uploads screen is a full-screen overlay reachable from Kip's profile
+  // area, not a bottom-nav tab — this just toggles it, independent of `tab`.
+  const [showUploads, setShowUploads] = useState(false);
+  // Which live recorder overlay is currently shown (null = none). Lifted to
+  // App level, not owned by Plans/Stats/Record individually, so starting a
+  // recording from any one of them is immediately visible/resumable from the
+  // others — one source of truth instead of three copies that could drift.
+  // Independent of whether the underlying entity's `recording` field exists:
+  // this is just "is the overlay open right now," not "is something in
+  // progress" (that's still read straight off the data wherever it's shown).
+  const [activeLiveTarget, setActiveLiveTarget] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1562,12 +1610,10 @@ export default function GKTrainerApp() {
           setMatches(parsed.matches || []);
           setAdHocSessions(parsed.adHocSessions || []);
           setOpponents(parsed.opponents || []);
+          setGeneralUploads(parsed.generalUploads || []);
 
           const active = findActiveRecording({ plans: parsed.plans, adHocSessions: parsed.adHocSessions, matches: parsed.matches });
-          if (active) {
-            setTab(active.kind === "match" ? "stats" : "plans");
-            setResumeTarget(active);
-          }
+          if (active) setActiveLiveTarget(active);
         }
       } catch (e) {
         /* no saved data yet */
@@ -1593,7 +1639,7 @@ export default function GKTrainerApp() {
     return computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises: allExercises }).length > 0;
   }, [profile, plans, adHocSessions, matches, season, allExercises]);
 
-  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents }) {
+  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGeneralUploads = generalUploads }) {
     setCustomExercises(nextCustom);
     setPlans(nextPlans);
     setSeason(nextSeason);
@@ -1602,7 +1648,8 @@ export default function GKTrainerApp() {
     setMatches(nextMatches);
     setAdHocSessions(nextAdHoc);
     setOpponents(nextOpponents);
-    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents });
+    setGeneralUploads(nextGeneralUploads);
+    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, generalUploads: nextGeneralUploads });
   }
 
   function addExercise(ex) {
@@ -1653,6 +1700,56 @@ export default function GKTrainerApp() {
     updateAndSave({ nextOpponents: upsertOpponentRoster(opponents, opponentName, roster) });
   }
 
+  function addGeneralUpload(meta) {
+    updateAndSave({ nextGeneralUploads: [...generalUploads, meta] });
+  }
+
+  function removeGeneralUpload(path) {
+    updateAndSave({ nextGeneralUploads: generalUploads.filter((f) => f.path !== path) });
+  }
+
+  // Confirmed PT/physio exercises always become new custom exercises tagged
+  // source: "physio" — never silently merged into Keepr's own curated
+  // library — placed verbatim into either a new session in an existing
+  // block or every session of a fresh rehab-type block. No invented
+  // progression: the same confirmed list repeats across every session,
+  // exactly matching what a real physio handout usually is ("do these N
+  // times a week for N weeks"), rather than Keepr guessing at a ramp.
+  function applyPtPlanToBlock({ items, destination, targetPlanId, blockConfig, sourceNiggleId }) {
+    const newExercises = items.map((it) => ({
+      id: uid(),
+      name: it.name,
+      category: "Rehab",
+      type: "Gym",
+      season: "Both",
+      equipment: "As prescribed by your physio",
+      format: it.prescription,
+      loadAreas: [],
+      desc: it.notes?.trim() || "Prescribed by your physio.",
+      custom: true,
+      source: "physio",
+      sourceNiggleId: sourceNiggleId || null,
+    }));
+    const nextCustom = [...customExercises, ...newExercises];
+    const buildEntries = () => newExercises.map((ex) => ({ entryId: uid(), exerciseId: ex.id, ...makeReps(ex.format) }));
+
+    if (destination === "new") {
+      const plan = generateRehabBlock(blockConfig.name, season, blockConfig.weeks, blockConfig.sessionsPerWeek, buildEntries);
+      updateAndSave({ nextCustom, nextPlans: [...plans, plan] });
+    } else {
+      const targetPlan = plans.find((p) => p.id === targetPlanId);
+      if (!targetPlan) return;
+      const targetWeek = targetPlan.weeks.find((w) => w.sessions.some((s) => !s.completed)) || targetPlan.weeks[targetPlan.weeks.length - 1];
+      const nextSessionNumber = Math.max(0, ...targetWeek.sessions.map((s) => s.sessionNumber)) + 1;
+      const newSession = { sessionId: uid(), sessionNumber: nextSessionNumber, exercises: buildEntries(), completed: false, focus: "Physio-prescribed" };
+      const nextPlan = {
+        ...targetPlan,
+        weeks: targetPlan.weeks.map((w) => (w.weekId === targetWeek.weekId ? { ...w, sessions: [...w.sessions, newSession] } : w)),
+      };
+      updateAndSave({ nextCustom, nextPlans: plans.map((p) => (p.id === targetPlanId ? nextPlan : p)) });
+    }
+  }
+
   function saveAdHocSession(session) {
     const exists = adHocSessions.some((s) => s.id === session.id);
     const next = exists ? adHocSessions.map((s) => (s.id === session.id ? session : s)) : [...adHocSessions, session];
@@ -1697,7 +1794,19 @@ export default function GKTrainerApp() {
         </div>
       )}
       <div className="flex-1 overflow-y-auto pb-20 max-w-md w-full mx-auto">
-        {tab === "library" && (
+        {showUploads && (
+          <UploadsScreen
+            profile={profile}
+            onSaveProfile={saveProfile}
+            generalUploads={generalUploads}
+            onAddGeneralUpload={addGeneralUpload}
+            onRemoveGeneralUpload={removeGeneralUpload}
+            plans={plans}
+            onApplyPtPlan={applyPtPlanToBlock}
+            onBack={() => setShowUploads(false)}
+          />
+        )}
+        {!showUploads && tab === "library" && (
           <Library
             exercises={allExercises}
             season={season}
@@ -1705,24 +1814,12 @@ export default function GKTrainerApp() {
             onDelete={deleteExercise}
           />
         )}
-        {tab === "builder" && (
-          <Builder
-            exercises={allExercises}
-            season={season}
-            profile={profile}
-            matches={matches}
-            plans={plans}
-            adHocSessions={adHocSessions}
-            onSave={(plan) => {
-              savePlan(plan);
-              setTab("plans");
-            }}
-          />
-        )}
-        {tab === "plans" && (
+        {!showUploads && tab === "plans" && (
           <Plans
             plans={plans}
             exercises={allExercises}
+            season={season}
+            profile={profile}
             onSave={savePlan}
             onDelete={deletePlan}
             onSetSessionDate={setPlanSessionDate}
@@ -1733,12 +1830,26 @@ export default function GKTrainerApp() {
             onDeleteAdHoc={deleteAdHocSession}
             opponents={opponents}
             onSaveOpponentRoster={saveOpponentRoster}
-            initialLiveTarget={resumeTarget && resumeTarget.kind !== "match" ? resumeTarget : null}
-            onConsumedInitialLiveTarget={() => setResumeTarget(null)}
+            onOpenLiveRecorder={setActiveLiveTarget}
           />
         )}
-        {tab === "advice" && <AdviceHub />}
-        {tab === "stats" && (
+        {!showUploads && tab === "record" && (
+          <RecordTab
+            plans={plans}
+            adHocSessions={adHocSessions}
+            matches={matches}
+            exercises={allExercises}
+            season={season}
+            opponents={opponents}
+            onSave={savePlan}
+            onSaveAdHoc={saveAdHocSession}
+            onSaveMatch={saveMatch}
+            onSaveOpponentRoster={saveOpponentRoster}
+            onOpenLiveRecorder={setActiveLiveTarget}
+          />
+        )}
+        {!showUploads && tab === "advice" && <AdviceHub />}
+        {!showUploads && tab === "stats" && (
           <StatsTab
             matches={matches}
             season={season}
@@ -1749,11 +1860,10 @@ export default function GKTrainerApp() {
             adHocSessions={adHocSessions}
             opponents={opponents}
             onSaveOpponentRoster={saveOpponentRoster}
-            initialLiveMatchId={resumeTarget && resumeTarget.kind === "match" ? resumeTarget.matchId : null}
-            onConsumedInitialLiveMatchId={() => setResumeTarget(null)}
+            onOpenLiveRecorder={setActiveLiveTarget}
           />
         )}
-        {tab === "kip" && (
+        {!showUploads && tab === "kip" && (
           <KipTab
             profile={profile}
             onSaveProfile={saveProfile}
@@ -1764,10 +1874,88 @@ export default function GKTrainerApp() {
             matches={matches}
             exercises={allExercises}
             adHocSessions={adHocSessions}
+            onApplyPtPlan={applyPtPlanToBlock}
+            onOpenUploads={() => setShowUploads(true)}
           />
         )}
       </div>
-      <BottomNav tab={tab} setTab={setTab} hasKipAlert={hasKipAlert} />
+
+      {activeLiveTarget?.kind === "plan" && (() => {
+        const livePlan = plans.find((p) => p.id === activeLiveTarget.planId);
+        const liveSession = livePlan?.weeks.find((w) => w.weekId === activeLiveTarget.weekId)?.sessions.find((s) => s.sessionId === activeLiveTarget.sessionId);
+        if (!liveSession) return null;
+        return (
+          <LiveSessionRecorder
+            session={liveSession}
+            kind="plan"
+            exercises={allExercises}
+            focus={activeLiveTarget.focus}
+            onUpdatePatch={(patch) => {
+              const next = {
+                ...livePlan,
+                weeks: livePlan.weeks.map((ww) => ww.weekId === activeLiveTarget.weekId
+                  ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === activeLiveTarget.sessionId ? { ...ss, ...patch } : ss)) }
+                  : ww),
+              };
+              savePlan(next);
+            }}
+            onFinish={({ rpe, note, durationMinutes, exercises: exercisesNext }) => {
+              const { recording, ...rest } = liveSession;
+              const next = {
+                ...livePlan,
+                weeks: livePlan.weeks.map((ww) => ww.weekId === activeLiveTarget.weekId
+                  ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === activeLiveTarget.sessionId
+                      ? { ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exercises: exercisesNext }
+                      : ss)) }
+                  : ww),
+              };
+              savePlan(next);
+              setActiveLiveTarget(null);
+            }}
+            onExit={() => setActiveLiveTarget(null)}
+          />
+        );
+      })()}
+
+      {activeLiveTarget?.kind === "adhoc" && (() => {
+        const liveSession = adHocSessions.find((s) => s.id === activeLiveTarget.sessionId);
+        if (!liveSession) return null;
+        return (
+          <LiveSessionRecorder
+            session={liveSession}
+            kind="adhoc"
+            exercises={allExercises}
+            focus={activeLiveTarget.focus}
+            onUpdatePatch={(patch) => saveAdHocSession({ ...liveSession, ...patch })}
+            onFinish={({ rpe, note, durationMinutes, exerciseLogs }) => {
+              const { recording, ...rest } = liveSession;
+              saveAdHocSession({ ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exerciseLogs });
+              setActiveLiveTarget(null);
+            }}
+            onExit={() => setActiveLiveTarget(null)}
+          />
+        );
+      })()}
+
+      {activeLiveTarget?.kind === "match" && (() => {
+        const liveMatch = matches.find((m) => m.id === activeLiveTarget.matchId);
+        if (!liveMatch) return null;
+        return (
+          <LiveMatchRecorder
+            match={liveMatch}
+            opponents={opponents}
+            onUpdatePatch={(patch) => saveMatch({ ...liveMatch, ...patch })}
+            onFinish={(patch) => {
+              const { recording, ...rest } = liveMatch;
+              saveMatch({ ...rest, ...patch });
+              setActiveLiveTarget(null);
+            }}
+            onExit={() => setActiveLiveTarget(null)}
+          />
+        );
+      })()}
+
+      <BottomNav tab={tab} setTab={(id) => { setShowUploads(false); setTab(id); }} hasKipAlert={hasKipAlert} />
     </div>
   );
 }
@@ -1827,7 +2015,7 @@ function TopBar({ season, setSeason }) {
 function BottomNav({ tab, setTab, hasKipAlert }) {
   const items = [
     { id: "library", label: "Library", Icon: BookOpen },
-    { id: "builder", label: "Build", Icon: Plus },
+    { id: "record", label: "Record", Icon: Circle },
     { id: "plans", label: "Plans", Icon: ListChecks },
     { id: "advice", label: "Advice", Icon: Lightbulb },
     { id: "stats", label: "Stats", Icon: BarChart3 },
@@ -1971,7 +2159,11 @@ function ExerciseRow({ ex, onClick }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="font-bold text-sm" style={{ color: "#12213A" }}>{ex.name}</span>
-          {ex.custom && (
+          {ex.source === "physio" ? (
+            <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#FCEFE9", color: "#C1483B" }}>
+              Physio
+            </span>
+          ) : ex.custom && (
             <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>
               Mine
             </span>
@@ -2137,7 +2329,7 @@ function Modal({ onClose, children }) {
 /* Builder                                                            */
 /* ---------------------------------------------------------------- */
 
-function Builder({ exercises, season, profile, matches, plans, adHocSessions, onSave }) {
+function Builder({ exercises, season, profile, matches, plans, adHocSessions, onSave, onBack }) {
   const [step, setStep] = useState("setup");
   const [name, setName] = useState("");
   const [blockSeason, setBlockSeason] = useState(season);
@@ -2182,6 +2374,11 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, on
 
   return (
     <div className="px-4 pt-4 pb-6">
+      {onBack && (
+        <button onClick={onBack} className="flex items-center gap-1 text-xs font-semibold text-gray-500 mb-3">
+          <ArrowLeft size={14} /> Back to Plans
+        </button>
+      )}
       <h2 className="text-lg font-black mb-3" style={{ color: "#12213A" }}>Build a 6-week block</h2>
 
       <Field label="Block name">
@@ -2359,7 +2556,14 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
                         return (
                           <div key={entry.entryId} className="flex items-center gap-2 bg-white rounded-md px-2 py-1.5 border" style={{ borderColor: "#DAD7CC" }}>
                             <div className="flex-1 min-w-0">
-                              <div className="text-xs font-semibold truncate">{ex.name}</div>
+                              <div className="flex items-center gap-1.5">
+                                <div className="text-xs font-semibold truncate">{ex.name}</div>
+                                {ex.source === "physio" && (
+                                  <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0" style={{ background: "#FCEFE9", color: "#C1483B" }}>
+                                    Physio
+                                  </span>
+                                )}
+                              </div>
                               <input
                                 value={repsDisplay(entry)}
                                 onChange={(e) => setReps(wi, si, entry.entryId, e.target.value)}
@@ -2568,10 +2772,11 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, initialLiveTarget = null, onConsumedInitialLiveTarget }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [showBuilder, setShowBuilder] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [logTarget, setLogTarget] = useState(null); // { plan, weekId, sessionId }
   const [dateTarget, setDateTarget] = useState(null); // { plan, weekId, sessionId, current }
@@ -2580,15 +2785,6 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
   const [adHocLogTarget, setAdHocLogTarget] = useState(null); // adHocSession
   const [confirmDeleteAdHoc, setConfirmDeleteAdHoc] = useState(null);
   const [matchFormDate, setMatchFormDate] = useState(null); // date string, non-null means "open match form"
-  const [liveTarget, setLiveTarget] = useState(initialLiveTarget); // { kind: "plan", planId, weekId, sessionId, focus } | { kind: "adhoc", sessionId }
-
-  // Seeds liveTarget on the very first mount right after an app-load
-  // auto-resume, then reports back so the parent clears its one-shot state —
-  // otherwise a later, ordinary visit to this tab would wrongly re-trigger it.
-  useEffect(() => {
-    if (initialLiveTarget) onConsumedInitialLiveTarget?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const editingPlan = plans.find((p) => p.id === editingId);
   if (editingPlan) {
@@ -2602,55 +2798,17 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
     );
   }
 
-  // Re-derived fresh from current plans/adHocSessions every render (never
-  // stored as a snapshot) so live updates during recording — and resuming
-  // after the tab was closed — always show the real current state.
-  const livePlan = liveTarget?.kind === "plan" ? plans.find((p) => p.id === liveTarget.planId) : null;
-  const liveSession = liveTarget?.kind === "plan"
-    ? livePlan?.weeks.find((w) => w.weekId === liveTarget.weekId)?.sessions.find((s) => s.sessionId === liveTarget.sessionId)
-    : liveTarget?.kind === "adhoc"
-      ? adHocSessions.find((s) => s.id === liveTarget.sessionId)
-      : null;
-
-  if (liveTarget && liveSession) {
+  if (showBuilder) {
     return (
-      <LiveSessionRecorder
-        session={liveSession}
-        kind={liveTarget.kind}
+      <Builder
         exercises={exercises}
-        focus={liveTarget.focus}
-        onUpdatePatch={(patch) => {
-          if (liveTarget.kind === "plan") {
-            const next = {
-              ...livePlan,
-              weeks: livePlan.weeks.map((ww) => ww.weekId === liveTarget.weekId
-                ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === liveTarget.sessionId ? { ...ss, ...patch } : ss)) }
-                : ww),
-            };
-            onSave(next);
-          } else {
-            onSaveAdHoc({ ...liveSession, ...patch });
-          }
-        }}
-        onFinish={({ rpe, note, durationMinutes, exercises: exercisesNext, exerciseLogs }) => {
-          if (liveTarget.kind === "plan") {
-            const { recording, ...rest } = liveSession;
-            const next = {
-              ...livePlan,
-              weeks: livePlan.weeks.map((ww) => ww.weekId === liveTarget.weekId
-                ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === liveTarget.sessionId
-                    ? { ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exercises: exercisesNext }
-                    : ss)) }
-                : ww),
-            };
-            onSave(next);
-          } else {
-            const { recording, ...rest } = liveSession;
-            onSaveAdHoc({ ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exerciseLogs });
-          }
-          setLiveTarget(null);
-        }}
-        onExit={() => setLiveTarget(null)}
+        season={season}
+        profile={profile}
+        matches={matches}
+        plans={plans}
+        adHocSessions={adHocSessions}
+        onSave={(plan) => { onSave(plan); setShowBuilder(false); }}
+        onBack={() => setShowBuilder(false)}
       />
     );
   }
@@ -2692,7 +2850,7 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
         <div className="pt-8 text-center">
           <CalendarRange size={32} color="#DAD7CC" className="mx-auto mb-3" />
           <div className="text-sm font-bold" style={{ color: "#12213A" }}>No blocks yet</div>
-          <div className="text-xs text-gray-500 mt-1">Head to Build to create your first 6-week block, or switch to Calendar to add a one-off session.</div>
+          <div className="text-xs text-gray-500 mt-1">Tap + New block below to create your first 6-week block, or switch to Calendar to add a one-off session.</div>
         </div>
       )}
 
@@ -2741,7 +2899,7 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
                 };
                 onSave(next2);
               }
-              setLiveTarget({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
+              onOpenLiveRecorder({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
             }}
             className="w-full py-2.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2"
             style={{ background: "#0E8388" }}
@@ -2782,6 +2940,17 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
           </div>
         </div>
       )}
+
+      <div className="flex items-center justify-between mt-4 mb-1">
+        <div className="text-base font-black" style={{ color: "#12213A" }}>Your blocks</div>
+        <button
+          onClick={() => setShowBuilder(true)}
+          className="flex items-center gap-1 text-sm font-bold text-white px-3.5 py-2 rounded-lg active:scale-[0.98] transition-transform"
+          style={{ background: "#0E8388" }}
+        >
+          <Plus size={16} /> New block
+        </button>
+      </div>
 
       {plans.map((p) => {
         const open = openId === p.id;
@@ -2862,7 +3031,13 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
                               if (!ex) return null;
                               return (
                                 <div key={entry.entryId} className="text-[11px] text-gray-600">
-                                  {ex.name} <span className="text-gray-400">— {repsDisplay(entry)}</span>
+                                  {ex.name}
+                                  {ex.source === "physio" && (
+                                    <span className="ml-1 text-[8px] font-bold uppercase tracking-wide px-1 py-0.5 rounded" style={{ background: "#FCEFE9", color: "#C1483B" }}>
+                                      Physio
+                                    </span>
+                                  )}
+                                  {" "}<span className="text-gray-400">— {repsDisplay(entry)}</span>
                                   {entry.loggedSets && entry.loggedSets.length > 0 && (
                                     <div className="text-[10px] text-gray-400 pl-2">
                                       Logged: {entry.loggedSets.map((set, i) => `${set.weight ?? "–"}kg×${set.reps ?? "–"}`).join(", ")}
@@ -2915,7 +3090,7 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
                 recording: startRecording(),
               };
               onSaveAdHoc(session);
-              setLiveTarget({ kind: "adhoc", sessionId: session.id });
+              onOpenLiveRecorder({ kind: "adhoc", sessionId: session.id });
             }}
             className="text-[11px] font-bold flex items-center gap-1"
             style={{ color: "#0E8388" }}
@@ -2932,7 +3107,7 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
         {[...adHocSessions].sort((a, b) => new Date(a.date) - new Date(b.date)).map((s) => (
           <button
             key={s.id}
-            onClick={() => (s.recording ? setLiveTarget({ kind: "adhoc", sessionId: s.id }) : setAdHocLogTarget(s))}
+            onClick={() => (s.recording ? onOpenLiveRecorder({ kind: "adhoc", sessionId: s.id }) : setAdHocLogTarget(s))}
             className="w-full text-left bg-white rounded-lg border p-2.5 flex items-center justify-between"
             style={{ borderColor: s.recording ? "#0E8388" : "#DAD7CC", borderWidth: s.recording ? 2 : 1 }}
           >
@@ -3043,6 +3218,99 @@ function Plans({ plans, exercises, onSave, onDelete, onSetSessionDate, matches, 
           onSaveOpponentRoster={onSaveOpponentRoster}
           onClose={() => setMatchFormDate(null)}
           onSave={(m) => { onSaveMatch(m); setMatchFormDate(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Top-level Record tab — the promoted entry point from the brief, sitting
+// alongside (not replacing) the contextual Record buttons already in Plans'
+// Today card and Stats' header. Both paths call the same onOpenLiveRecorder
+// prop lifted to GKTrainerApp, so whichever one is used, the other
+// immediately sees it as "in progress" too — one shared source of truth.
+function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, onSaveAdHoc, onSaveMatch, onSaveOpponentRoster, onOpenLiveRecorder }) {
+  const [showLiveMatchForm, setShowLiveMatchForm] = useState(false);
+  const active = findActiveRecording({ plans, adHocSessions, matches });
+
+  function startTraining() {
+    const next = nextSuggestedSession(plans);
+    if (next) {
+      const nextPlan = {
+        ...next.plan,
+        weeks: next.plan.weeks.map((ww) => ww.weekId === next.week.weekId
+          ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === next.session.sessionId ? { ...ss, recording: startRecording() } : ss)) }
+          : ww),
+      };
+      onSave(nextPlan);
+      onOpenLiveRecorder({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
+    } else {
+      const session = {
+        id: uid(), title: "", notes: "", date: new Date().toISOString().slice(0, 10),
+        exerciseIds: [], doneExerciseIds: [], exerciseLogs: {},
+        completed: false, rpe: null, note: "", completedAt: null,
+        recording: startRecording(),
+      };
+      onSaveAdHoc(session);
+      onOpenLiveRecorder({ kind: "adhoc", sessionId: session.id });
+    }
+  }
+
+  const resumeLabel = !active ? null
+    : active.kind === "match"
+      ? `Resume recording — vs ${matches.find((m) => m.id === active.matchId)?.opponent || "match"}`
+      : "Resume recording — training";
+
+  return (
+    <div className="px-4 pt-4 pb-8">
+      <h2 className="text-lg font-black mb-3" style={{ color: "#12213A" }}>Record</h2>
+
+      {active ? (
+        <button
+          onClick={() => onOpenLiveRecorder(active)}
+          className="w-full py-4 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2"
+          style={{ background: "#0E8388" }}
+        >
+          <span className="w-2.5 h-2.5 rounded-full" style={{ background: "#fff" }} /> {resumeLabel}
+        </button>
+      ) : (
+        <div className="space-y-3">
+          <button onClick={startTraining} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
+            <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#0E8388" }}>
+              <span className="w-3 h-3 rounded-full" style={{ background: "#fff" }} />
+            </div>
+            <div>
+              <div className="font-bold text-sm" style={{ color: "#12213A" }}>Record training session</div>
+              <div className="text-xs text-gray-500 mt-0.5">Starts your next planned session, or a one-off if nothing's due</div>
+            </div>
+          </button>
+          <button onClick={() => setShowLiveMatchForm(true)} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
+            <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#0E8388" }}>
+              <span className="w-3 h-3 rounded-full" style={{ background: "#fff" }} />
+            </div>
+            <div>
+              <div className="font-bold text-sm" style={{ color: "#12213A" }}>Record match</div>
+              <div className="text-xs text-gray-500 mt-0.5">Set the opponent, then track shots live from kickoff</div>
+            </div>
+          </button>
+        </div>
+      )}
+
+      {showLiveMatchForm && (
+        <MatchFormModal
+          season={season}
+          matches={matches}
+          opponents={opponents}
+          onSaveOpponentRoster={onSaveOpponentRoster}
+          title="Start a live match"
+          submitLabel="Start recording"
+          onClose={() => setShowLiveMatchForm(false)}
+          onSave={(m) => {
+            const withRecording = { ...m, recording: startRecording() };
+            onSaveMatch(withRecording);
+            setShowLiveMatchForm(false);
+            onOpenLiveRecorder({ kind: "match", matchId: withRecording.id });
+          }}
         />
       )}
     </div>
@@ -3369,7 +3637,14 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
               >
                 {(item.done || hasLogged) ? <CheckCircle2 size={18} color="#0E8388" className="shrink-0" /> : <Circle size={18} color="#DAD7CC" className="shrink-0" />}
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold" style={{ color: "#12213A" }}>{ex.name}</div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="text-sm font-semibold" style={{ color: "#12213A" }}>{ex.name}</div>
+                    {ex.source === "physio" && (
+                      <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0" style={{ background: "#FCEFE9", color: "#C1483B" }}>
+                        Physio
+                      </span>
+                    )}
+                  </div>
                   {item.reps && <div className="text-[11px] text-gray-400">{item.reps}</div>}
                   {hasLogged && (
                     <div className="text-[10px] text-gray-400">
@@ -3504,7 +3779,7 @@ function LogSessionModal({ onClose, onSave, focus, gymEntries = [] }) {
 /* Kip                                                                */
 /* ---------------------------------------------------------------- */
 
-function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions }) {
+function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onApplyPtPlan, onOpenUploads }) {
   const [editing, setEditing] = useState(!profile.onboarded);
 
   if (editing) {
@@ -3515,6 +3790,8 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
         onCancel={profile.onboarded ? () => setEditing(false) : null}
         onSaveProfile={onSaveProfile}
         exercises={exercises}
+        plans={plans}
+        onApplyPtPlan={onApplyPtPlan}
       />
     );
   }
@@ -3531,11 +3808,12 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
       exercises={exercises}
       adHocSessions={adHocSessions}
       onEditProfile={() => setEditing(true)}
+      onOpenUploads={onOpenUploads}
     />
   );
 }
 
-function NiggleDetailModal({ niggle, exercises, onClose, onSave }) {
+function NiggleDetailModal({ niggle, exercises, plans, onClose, onSave, onApplyPtPlan }) {
   const [addingLog, setAddingLog] = useState(false);
   const [logDate, setLogDate] = useState(new Date().toISOString().slice(0, 10));
   const [logNote, setLogNote] = useState("");
@@ -3543,6 +3821,7 @@ function NiggleDetailModal({ niggle, exercises, onClose, onSave }) {
   const [picker, setPicker] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [fileError, setFileError] = useState(null);
+  const [extractingFile, setExtractingFile] = useState(null); // raw File, once uploaded, while it's read for a physio plan
   const fileInputRef = React.useRef(null);
 
   const rehabLog = niggle.rehabLog || [];
@@ -3569,6 +3848,7 @@ function NiggleDetailModal({ niggle, exercises, onClose, onSave }) {
     try {
       const meta = await uploadNiggleFile(niggle.id, file);
       onSave({ ...niggle, files: [...files, meta] });
+      setExtractingFile(file);
     } catch (err) {
       setFileError(err.message || "Upload failed");
     } finally {
@@ -3619,7 +3899,7 @@ function NiggleDetailModal({ niggle, exercises, onClose, onSave }) {
           <input ref={fileInputRef} type="file" accept="application/pdf,image/*" className="hidden" onChange={handleFileSelect} disabled={uploading} />
         </label>
         {fileError && <div className="text-[11px] mt-1" style={{ color: "#C1483B" }}>{fileError}</div>}
-        <p className="text-[10px] text-gray-400 mt-1.5">Stored privately — only you can access these. Not parsed or scheduled automatically; create a one-off session yourself if you want to work from what's here.</p>
+        <p className="text-[10px] text-gray-400 mt-1.5">Stored privately — only you can access these. A PDF or image gets read automatically for exercises you can review and add to a block; nothing is scheduled without your confirmation.</p>
       </div>
 
       <div>
@@ -3684,12 +3964,312 @@ function NiggleDetailModal({ niggle, exercises, onClose, onSave }) {
           onPick={(ex) => { setLogExerciseIds([...logExerciseIds, ex.id]); setPicker(false); }}
         />
       )}
+
+      {extractingFile && (
+        <PtPlanReviewModal
+          file={extractingFile}
+          plans={plans}
+          onClose={() => setExtractingFile(null)}
+          onConfirmed={(payload) => {
+            onApplyPtPlan({ ...payload, sourceNiggleId: niggle.id });
+            setExtractingFile(null);
+          }}
+        />
+      )}
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
     </Modal>
   );
 }
 
-function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises }) {
+// Extraction runs automatically on mount (the file was already uploaded by
+// the caller) with a visible loading state — never silent. Nothing is
+// committed to a block until the keeper reviews, edits, and confirms; a
+// failed or low-confidence read falls back to the exact same review UI
+// started empty, rather than forcing a bad extraction through.
+function PtPlanReviewModal({ file, plans, onClose, onConfirmed }) {
+  const eligiblePlans = plans.filter((p) => p.weeks.some((w) => w.sessions.some((s) => !s.completed)));
+  const [status, setStatus] = useState("loading"); // loading | ready | failed
+  const [items, setItems] = useState([]);
+  const [reason, setReason] = useState(null);
+  const [stage, setStage] = useState("review"); // review | destination
+  const [destination, setDestination] = useState(eligiblePlans.length > 0 ? "current" : "new");
+  const [targetPlanId, setTargetPlanId] = useState(eligiblePlans[0]?.id || null);
+  const [blockName, setBlockName] = useState("Rehab Plan");
+  const [weeks, setWeeks] = useState(4);
+  const [sessionsPerWeek, setSessionsPerWeek] = useState(3);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await extractPtPlanFromFile(file);
+        if (result.looksLikePlan && result.exercises.length > 0) {
+          setItems(result.exercises.map((e) => ({ name: e.name || "", prescription: e.prescription || "", notes: e.notes || "" })));
+          setStatus("ready");
+        } else {
+          setReason(result.reason || "This didn't look like a structured exercise plan Kip could read confidently.");
+          setStatus("failed");
+        }
+      } catch (e) {
+        setReason("Couldn't read this file automatically — you can still enter the exercises yourself.");
+        setStatus("failed");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function updateItem(i, patch) {
+    setItems(items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  }
+  function removeItem(i) {
+    setItems(items.filter((_, idx) => idx !== i));
+  }
+  function addItem() {
+    setItems([...items, { name: "", prescription: "", notes: "" }]);
+  }
+
+  function confirm() {
+    const cleanItems = items
+      .filter((it) => it.name.trim())
+      .map((it) => ({ name: it.name.trim(), prescription: it.prescription.trim(), notes: it.notes.trim() }));
+    onConfirmed({
+      items: cleanItems,
+      destination,
+      targetPlanId: destination === "current" ? targetPlanId : null,
+      blockConfig: destination === "new" ? { name: blockName.trim() || "Rehab Plan", weeks, sessionsPerWeek } : null,
+    });
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      {status === "loading" && (
+        <div className="py-8 text-center">
+          <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Reading your plan with Kip…</div>
+          <div className="text-xs text-gray-500">This can take a few seconds.</div>
+        </div>
+      )}
+
+      {status === "failed" && (
+        <div>
+          <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Couldn't read this automatically</h3>
+          <p className="text-sm text-gray-600 mb-4">{reason}</p>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Just keep the file</button>
+            <button onClick={() => setStatus("ready")} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>Enter manually</button>
+          </div>
+        </div>
+      )}
+
+      {status === "ready" && stage === "review" && (
+        <div>
+          <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Review the exercises</h3>
+          <p className="text-xs text-gray-500 mb-3">Nothing is added to a block until you confirm below — check these match what's actually on the page, and edit anything that's wrong.</p>
+          <div className="space-y-2 mb-3 max-h-80 overflow-y-auto">
+            {items.map((it, i) => (
+              <div key={i} className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+                <div className="flex items-center gap-2 mb-1.5">
+                  <input className="input flex-1" placeholder="Exercise name" value={it.name} onChange={(e) => updateItem(i, { name: e.target.value })} />
+                  <button onClick={() => removeItem(i)}><X size={14} color="#C1483B" /></button>
+                </div>
+                <input className="input mb-1.5 text-xs" placeholder="Sets/reps or duration, e.g. 3 x 15" value={it.prescription} onChange={(e) => updateItem(i, { prescription: e.target.value })} />
+                <textarea className="input text-xs" rows={2} placeholder="Notes from the physio (optional)" value={it.notes} onChange={(e) => updateItem(i, { notes: e.target.value })} />
+              </div>
+            ))}
+            {items.length === 0 && <div className="text-xs text-gray-400 text-center py-3">No exercises yet — add one below.</div>}
+          </div>
+          <button onClick={addItem} className="w-full py-2 rounded-lg text-xs font-bold border mb-3" style={{ borderColor: "#0E8388", color: "#0E8388" }}>+ Add exercise</button>
+          <button disabled={items.filter((it) => it.name.trim()).length === 0} onClick={() => setStage("destination")} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+            Continue
+          </button>
+        </div>
+      )}
+
+      {status === "ready" && stage === "destination" && (
+        <div>
+          <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>Add to a block</h3>
+
+          <div className="space-y-2 mb-4">
+            <button onClick={() => setDestination("current")} disabled={eligiblePlans.length === 0} className="w-full text-left bg-white rounded-lg border p-3 disabled:opacity-40" style={{ borderColor: destination === "current" ? "#0E8388" : "#DAD7CC", borderWidth: destination === "current" ? 2 : 1 }}>
+              <div className="font-bold text-sm" style={{ color: "#12213A" }}>Add to current block</div>
+              <div className="text-xs text-gray-500">{eligiblePlans.length === 0 ? "No active block to add to" : "Adds a new session to an existing block"}</div>
+            </button>
+            <button onClick={() => setDestination("new")} className="w-full text-left bg-white rounded-lg border p-3" style={{ borderColor: destination === "new" ? "#0E8388" : "#DAD7CC", borderWidth: destination === "new" ? 2 : 1 }}>
+              <div className="font-bold text-sm" style={{ color: "#12213A" }}>Create a new Rehab block</div>
+              <div className="text-xs text-gray-500">A dedicated block just for this plan</div>
+            </button>
+          </div>
+
+          {destination === "current" && eligiblePlans.length > 0 && (
+            <Field label="Which block?">
+              <select className="input" value={targetPlanId || ""} onChange={(e) => setTargetPlanId(e.target.value)}>
+                {eligiblePlans.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </Field>
+          )}
+
+          {destination === "new" && (
+            <div className="space-y-3">
+              <Field label="Block name">
+                <input className="input" value={blockName} onChange={(e) => setBlockName(e.target.value)} />
+              </Field>
+              <div>
+                <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Length (weeks)</div>
+                <div className="flex gap-2">
+                  {[2, 4, 6].map((n) => (
+                    <button key={n} onClick={() => setWeeks(n)} className="flex-1 py-2 rounded-lg text-sm font-bold border" style={n === weeks ? { background: "#12213A", color: "#fff", borderColor: "#12213A" } : { borderColor: "#DAD7CC" }}>{n}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Sessions per week</div>
+                <div className="flex gap-2">
+                  {[2, 3, 4, 5].map((n) => (
+                    <button key={n} onClick={() => setSessionsPerWeek(n)} className="flex-1 py-2 rounded-lg text-sm font-bold border" style={n === sessionsPerWeek ? { background: "#12213A", color: "#fff", borderColor: "#12213A" } : { borderColor: "#DAD7CC" }}>{n}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => setStage("review")} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Back</button>
+            <button
+              disabled={destination === "current" && !targetPlanId}
+              onClick={confirm}
+              className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
+              style={{ background: "#0E8388" }}
+            >
+              Add exercises
+            </button>
+          </div>
+        </div>
+      )}
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+    </Modal>
+  );
+}
+
+// Aggregates every uploaded file — niggle-linked and general — into one flat,
+// most-recent-first list, and offers the same upload action (with an
+// optional niggle-or-general picker) directly from here rather than only
+// from inside a niggle's own detail view. Reuses PtPlanReviewModal/
+// extractPtPlanFromFile so there's one extraction path, not a second one
+// duplicated for this screen.
+function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, plans, onApplyPtPlan, onBack }) {
+  const niggles = profile.niggles || [];
+  const [uploading, setUploading] = useState(false);
+  const [fileError, setFileError] = useState(null);
+  const [linkTo, setLinkTo] = useState("general");
+  const [extracting, setExtracting] = useState(null); // { file, sourceNiggleId }
+  const fileInputRef = React.useRef(null);
+
+  const rows = [
+    ...niggles.flatMap((n) => (n.files || []).map((f) => ({ ...f, tag: n.part || "Niggle", niggleId: n.id }))),
+    ...generalUploads.map((f) => ({ ...f, tag: "General", niggleId: null })),
+  ].sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+
+  async function handleFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setFileError(null);
+    try {
+      if (linkTo === "general") {
+        const meta = await uploadGeneralFile(file);
+        onAddGeneralUpload(meta);
+        setExtracting({ file, sourceNiggleId: null });
+      } else {
+        const niggle = niggles.find((n) => n.id === linkTo);
+        const meta = await uploadNiggleFile(niggle.id, file);
+        onSaveProfile({ ...profile, niggles: niggles.map((n) => (n.id === niggle.id ? { ...n, files: [...(n.files || []), meta] } : n)) });
+        setExtracting({ file, sourceNiggleId: niggle.id });
+      }
+    } catch (err) {
+      setFileError(err.message || "Upload failed");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function viewFile(path) {
+    try {
+      const url = await getSignedNiggleFileUrl(path);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      setFileError("Couldn't open file");
+    }
+  }
+
+  async function removeFile(row) {
+    try {
+      await deleteNiggleFile(row.path);
+      if (row.niggleId) {
+        onSaveProfile({ ...profile, niggles: niggles.map((n) => (n.id === row.niggleId ? { ...n, files: (n.files || []).filter((f) => f.path !== row.path) } : n)) });
+      } else {
+        onRemoveGeneralUpload(row.path);
+      }
+    } catch {
+      setFileError("Couldn't delete file");
+    }
+  }
+
+  return (
+    <div className="px-4 pt-4 pb-8">
+      <button onClick={onBack} className="flex items-center gap-1 text-xs font-semibold text-gray-500 mb-3">
+        <ArrowLeft size={14} /> Back
+      </button>
+      <h2 className="text-lg font-black mb-1" style={{ color: "#12213A" }}>Uploads</h2>
+      <p className="text-xs text-gray-500 mb-4">Every PT/physio file you've uploaded, in one place. Stored privately — only you can access these.</p>
+
+      <div className="bg-white rounded-lg border p-3 mb-5" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Upload a file</div>
+        {niggles.length > 0 && (
+          <select className="input mb-2 text-xs" value={linkTo} onChange={(e) => setLinkTo(e.target.value)}>
+            <option value="general">General (not linked to a niggle)</option>
+            {niggles.map((n) => <option key={n.id} value={n.id}>{n.part || "Niggle"}</option>)}
+          </select>
+        )}
+        <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
+          <Upload size={13} /> {uploading ? "Uploading…" : "Upload PDF or image"}
+          <input ref={fileInputRef} type="file" accept="application/pdf,image/*" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+        </label>
+        {fileError && <div className="text-[11px] mt-1" style={{ color: "#C1483B" }}>{fileError}</div>}
+        <p className="text-[10px] text-gray-400 mt-1.5">A PDF or image gets read automatically for exercises you can review and add to a block; nothing is scheduled without your confirmation.</p>
+      </div>
+
+      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">All files ({rows.length})</div>
+      <div className="space-y-1.5">
+        {rows.map((f) => (
+          <div key={f.path} className="flex items-center justify-between bg-white rounded-md px-2.5 py-2 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+            <button onClick={() => viewFile(f.path)} className="flex items-center gap-1.5 flex-1 min-w-0 text-left" style={{ color: "#0E8388" }}>
+              <Paperclip size={12} className="shrink-0" />
+              <div className="min-w-0">
+                <div className="truncate font-semibold">{f.name}</div>
+                <div className="text-[10px] text-gray-400">{f.tag}</div>
+              </div>
+            </button>
+            <button onClick={() => removeFile(f)}><X size={13} color="#C1483B" /></button>
+          </div>
+        ))}
+        {rows.length === 0 && <div className="text-[11px] text-gray-400">No files uploaded yet.</div>}
+      </div>
+
+      {extracting && (
+        <PtPlanReviewModal
+          file={extracting.file}
+          plans={plans}
+          onClose={() => setExtracting(null)}
+          onConfirmed={(payload) => {
+            onApplyPtPlan({ ...payload, sourceNiggleId: extracting.sourceNiggleId });
+            setExtracting(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, plans, onApplyPtPlan }) {
   const [niggleDetailId, setNiggleDetailId] = useState(null);
   const [form, setForm] = useState({
     level: profile.level || "",
@@ -3851,8 +4431,10 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises }) 
         <NiggleDetailModal
           niggle={form.niggles.find((n) => n.id === niggleDetailId)}
           exercises={exercises}
+          plans={plans}
           onClose={() => setNiggleDetailId(null)}
           onSave={saveNiggleImmediately}
+          onApplyPtPlan={onApplyPtPlan}
         />
       )}
 
@@ -3890,7 +4472,65 @@ async function callKip(systemPrompt, apiMessages) {
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
 }
 
-function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onEditProfile }) {
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+const PT_PLAN_EXTRACTION_PROMPT = `You are reading an uploaded physio/PT rehab document for a handball goalkeeper and extracting a structured exercise list from it. Respond with ONLY a single JSON object, no other text before or after it, in exactly this shape:
+
+{"looksLikePlan": boolean, "exercises": [{"name": string, "prescription": string, "notes": string}], "reason": string or null}
+
+- "looksLikePlan" is true only if this genuinely looks like a structured exercise/rehab plan you can confidently read.
+- If it's handwritten and illegible, low quality, not actually a training document, or you're not confident in the extraction, set "looksLikePlan" to false, leave "exercises" as an empty array, and put a short plain-English reason in "reason" (e.g. "This looks handwritten and I can't read it reliably" or "This doesn't look like an exercise plan").
+- Each exercise's "prescription" should be the sets/reps or duration exactly as written (e.g. "3 x 15" or "hold 30s each side"), and "notes" should capture any specific instruction from the physio (tempo, equipment, form cues) — leave "notes" as an empty string if there's nothing beyond the name and prescription.
+- Never invent an exercise, a number, or an instruction that isn't actually on the page.`;
+
+// Reused by both the niggle-detail upload flow and the top-level Uploads
+// screen — one extraction path, not two divergent ones. Never throws for a
+// "this isn't a plan" case; only throws on a genuine request failure, which
+// callers treat the same as looksLikePlan: false (plain message, fall back
+// to manual entry).
+async function extractPtPlanFromFile(file) {
+  const base64 = await fileToBase64(file);
+  const isPdf = file.type === "application/pdf";
+  const contentBlock = isPdf
+    ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
+    : { type: "image", source: { type: "base64", media_type: file.type, data: base64 } };
+  const { data: { session } } = await supabase.auth.getSession();
+  const response = await fetch("/.netlify/functions/kip-chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session?.access_token}`,
+    },
+    body: JSON.stringify({
+      system: PT_PLAN_EXTRACTION_PROMPT,
+      messages: [{ role: "user", content: [contentBlock, { type: "text", text: "Extract the exercises from this document as instructed." }] }],
+      maxTokens: 2000,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Extraction request failed");
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : text);
+    return {
+      looksLikePlan: !!parsed.looksLikePlan,
+      exercises: Array.isArray(parsed.exercises) ? parsed.exercises : [],
+      reason: parsed.reason || null,
+    };
+  } catch (e) {
+    return { looksLikePlan: false, exercises: [], reason: "Kip's response wasn't in the expected format." };
+  }
+}
+
+function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onEditProfile, onOpenUploads }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
@@ -3968,7 +4608,11 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
             <span className="text-sm font-black" style={{ color: "#12213A" }}>Kip</span>
             <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>Beta</span>
           </div>
-          <button onClick={onEditProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Edit profile</button>
+          <div className="flex items-center gap-2">
+            <button onClick={onOpenUploads} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Uploads</button>
+            <span className="text-[11px] text-gray-300">·</span>
+            <button onClick={onEditProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Edit profile</button>
+          </div>
         </div>
         <div className="flex items-center justify-between">
           <button onClick={() => setShowBadges(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#8A8779" }}>
@@ -4728,43 +5372,17 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, initialLiveMatchId = null, onConsumedInitialLiveMatchId }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [showLiveForm, setShowLiveForm] = useState(false);
-  const [liveMatchId, setLiveMatchId] = useState(initialLiveMatchId);
   const [filter, setFilter] = useState(season);
 
-  // Seeds liveMatchId on the very first mount right after an app-load
-  // auto-resume, then reports back so the parent clears its one-shot state —
-  // otherwise a later, ordinary visit to this tab would wrongly re-trigger it.
-  useEffect(() => {
-    if (initialLiveMatchId) onConsumedInitialLiveMatchId?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Otherwise not auto-rendered on mount — only surfaced as a "Resume
-  // recording" prompt, same convention as Plans' Today card, so Minimize
-  // actually minimizes rather than re-forcing the recorder open.
+  // Not auto-rendered on mount — only surfaced as a "Resume recording"
+  // prompt, same convention as Plans' Today card, so Minimize actually
+  // minimizes rather than re-forcing the recorder open. The recorder itself
+  // renders once, at the App level, shared with Plans and the Record tab.
   const inProgressMatch = matches.find((m) => m.recording);
-
-  const liveMatch = matches.find((m) => m.id === liveMatchId);
-  if (liveMatch) {
-    return (
-      <LiveMatchRecorder
-        match={liveMatch}
-        opponents={opponents}
-        onUpdatePatch={(patch) => onSave({ ...liveMatch, ...patch })}
-        onFinish={(patch) => {
-          const { recording, ...rest } = liveMatch;
-          onSave({ ...rest, ...patch });
-          setLiveMatchId(null);
-          setOpenMatchId(liveMatch.id);
-        }}
-        onExit={() => setLiveMatchId(null)}
-      />
-    );
-  }
 
   const openMatch = matches.find((m) => m.id === openMatchId);
   if (openMatch) {
@@ -4787,7 +5405,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
         <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Match stats</h2>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => (inProgressMatch ? setLiveMatchId(inProgressMatch.id) : setShowLiveForm(true))}
+            onClick={() => (inProgressMatch ? onOpenLiveRecorder({ kind: "match", matchId: inProgressMatch.id }) : setShowLiveForm(true))}
             className="px-3 py-2 rounded-lg text-xs font-bold text-white flex items-center gap-1.5"
             style={{ background: "#0E8388" }}
           >
@@ -4926,7 +5544,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
             const withRecording = { ...m, recording: startRecording() };
             onSave(withRecording);
             setShowLiveForm(false);
-            setLiveMatchId(withRecording.id);
+            onOpenLiveRecorder({ kind: "match", matchId: withRecording.id });
           }}
         />
       )}

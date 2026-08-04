@@ -50,6 +50,27 @@ export async function uploadNiggleFile(niggleId, file) {
   return { path, name: file.name, mimeType: file.type, size: file.size, uploadedAt: new Date().toISOString() };
 }
 
+// Same bucket/RLS as uploadNiggleFile — the policies only check the first
+// path segment against auth.uid(), so a "general" second segment (instead of
+// a niggle id) needs no new bucket or migration.
+export async function uploadGeneralFile(file) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error("Not signed in");
+
+  const isPdf = file.type === "application/pdf";
+  const isImage = file.type.startsWith("image/");
+  if (!isPdf && !isImage) throw new Error("Only PDF or image files are supported");
+  if (file.size > MAX_NIGGLE_FILE_BYTES) throw new Error("File is too large (10MB max)");
+
+  const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+  const path = `${user.id}/general/${crypto.randomUUID()}-${safeName}`;
+
+  const { error } = await supabase.storage.from(NIGGLE_FILES_BUCKET).upload(path, file, { upsert: false });
+  if (error) throw error;
+
+  return { path, name: file.name, mimeType: file.type, size: file.size, uploadedAt: new Date().toISOString() };
+}
+
 // Bucket is private — this is the only way to actually view/download a
 // file. Short-lived on purpose; call fresh each time rather than caching.
 export async function getSignedNiggleFileUrl(path, expiresInSeconds = 300) {

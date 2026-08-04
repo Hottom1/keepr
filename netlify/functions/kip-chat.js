@@ -28,10 +28,16 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400 });
   }
 
-  const { system, messages } = body;
+  const { system, messages, maxTokens } = body;
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response(JSON.stringify({ error: "messages must be a non-empty array" }), { status: 400 });
   }
+
+  // Content blocks are forwarded verbatim (string or array — e.g. an image/
+  // document block for PT-plan extraction), so no shape change was needed
+  // here for that. The PDF beta header is only added when a message
+  // actually carries a document block, so ordinary chat is unaffected.
+  const hasDocument = messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b?.type === "document"));
 
   const anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -39,10 +45,11 @@ export default async (req) => {
       "Content-Type": "application/json",
       "x-api-key": ANTHROPIC_API_KEY,
       "anthropic-version": "2023-06-01",
+      ...(hasDocument ? { "anthropic-beta": "pdfs-2024-09-25" } : {}),
     },
     body: JSON.stringify({
       model: "claude-sonnet-5",
-      max_tokens: 1000,
+      max_tokens: maxTokens || 1000,
       system,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
     }),
