@@ -1913,6 +1913,17 @@ export default function GKTrainerApp() {
               setActiveLiveTarget(null);
             }}
             onExit={() => setActiveLiveTarget(null)}
+            onDelete={() => {
+              const { recording, ...rest } = liveSession;
+              const next = {
+                ...livePlan,
+                weeks: livePlan.weeks.map((ww) => ww.weekId === activeLiveTarget.weekId
+                  ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === activeLiveTarget.sessionId ? rest : ss)) }
+                  : ww),
+              };
+              savePlan(next);
+              setActiveLiveTarget(null);
+            }}
           />
         );
       })()}
@@ -1933,6 +1944,10 @@ export default function GKTrainerApp() {
               setActiveLiveTarget(null);
             }}
             onExit={() => setActiveLiveTarget(null)}
+            onDelete={() => {
+              deleteAdHocSession(liveSession.id);
+              setActiveLiveTarget(null);
+            }}
           />
         );
       })()}
@@ -1951,6 +1966,10 @@ export default function GKTrainerApp() {
               setActiveLiveTarget(null);
             }}
             onExit={() => setActiveLiveTarget(null)}
+            onDelete={() => {
+              deleteMatch(liveMatch.id);
+              setActiveLiveTarget(null);
+            }}
           />
         );
       })()}
@@ -3538,11 +3557,12 @@ function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete
 // the same object the rest of the app already saves, not a parallel one —
 // so closing or backgrounding the tab never loses progress: reopening just
 // finds the same in-progress session and picks up where it left off.
-function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, onFinish, onExit }) {
+function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, onFinish, onExit, onDelete }) {
   const [now, setNow] = useState(Date.now());
   const [picker, setPicker] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [finishing, setFinishing] = useState(false);
+  const [confirmDeleting, setConfirmDeleting] = useState(false);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -3603,9 +3623,14 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
   return (
     <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
-        <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
-          <ChevronDown size={14} /> Minimize
-        </button>
+        <div className="flex items-center justify-between mb-2">
+          <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+            <ChevronDown size={14} /> Minimize
+          </button>
+          <button onClick={() => setConfirmDeleting(true)} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+            <Trash2 size={13} /> Delete
+          </button>
+        </div>
         <div className="flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold uppercase tracking-wide text-white/50">Recording</div>
@@ -3690,6 +3715,25 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
       </div>
 
       {picker && <ExercisePickerModal exercises={exercises} onClose={() => setPicker(false)} onPick={addAdHocExercise} />}
+
+      {confirmDeleting && (
+        <Modal onClose={() => setConfirmDeleting(false)}>
+          <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>
+            {kind === "plan" ? "Cancel this recording?" : "Delete this session?"}
+          </h3>
+          <p className="text-sm text-gray-600 mb-4">
+            {kind === "plan"
+              ? "This session stays in your block — only the recording and anything logged during it will be cleared."
+              : "This session was created for this recording, so deleting it removes it completely. This can't be undone."}
+          </p>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmDeleting(false)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Keep it</button>
+            <button onClick={onDelete} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>
+              {kind === "plan" ? "Cancel recording" : "Delete"}
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {finishing && (
         <LogSessionModal
@@ -5261,10 +5305,11 @@ function MatchWrapUpModal({ match, durationMinutes, onClose, onSave }) {
   );
 }
 
-function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit }) {
+function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete }) {
   const [now, setNow] = useState(Date.now());
   const [zoneTap, setZoneTap] = useState(null);
   const [wrappingUp, setWrappingUp] = useState(false);
+  const [confirmDeleting, setConfirmDeleting] = useState(false);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -5302,9 +5347,14 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   return (
     <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
-        <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
-          <ChevronDown size={14} /> Minimize
-        </button>
+        <div className="flex items-center justify-between mb-2">
+          <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+            <ChevronDown size={14} /> Minimize
+          </button>
+          <button onClick={() => setConfirmDeleting(true)} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+            <Trash2 size={13} /> Delete
+          </button>
+        </div>
         <div className="flex items-center justify-between">
           <div>
             <div className="text-[10px] font-bold uppercase tracking-wide text-white/50">Recording</div>
@@ -5359,6 +5409,17 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
       </div>
 
       {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} roster={findOpponentRoster(opponents, match.opponent)?.roster} onClose={() => setZoneTap(null)} onSave={logShot} />}
+
+      {confirmDeleting && (
+        <Modal onClose={() => setConfirmDeleting(false)}>
+          <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Delete this match?</h3>
+          <p className="text-sm text-gray-600 mb-4">This match was created for this recording, so deleting it removes it — and any shots already logged — completely. This can't be undone.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmDeleting(false)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Keep it</button>
+            <button onClick={onDelete} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Delete</button>
+          </div>
+        </Modal>
+      )}
 
       {wrappingUp && (
         <MatchWrapUpModal
