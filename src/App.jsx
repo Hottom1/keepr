@@ -253,8 +253,29 @@ const ADVICE_DIAGRAMS = {
   straightShotCorner: StraightShotCornerDiagram,
 };
 
+// Jedziniak et al. (2025), Brain Sciences — eye-tracking study of elite
+// handball goalkeepers during penalty throws. Longer "quiet eye" duration
+// (the final steady fixation before release) was linked to more effective
+// saves in both groups; effective male goalkeepers tended to fixate on the
+// throwing arm/forearm and ball, effective female goalkeepers on the torso
+// and head. Appended to "Reading the Shooter" at render time rather than
+// baked into ADVICE_TOPICS, so the general version (both cues, no mention
+// of gender) is what an unset or "prefer not to say" keeper always sees —
+// never a gap in content, just no lean either way.
+const QUIET_EYE_DURATION_TIP = "Holding your final fixation steady right up to the moment of release — the \"quiet eye\" — is linked to more effective saves. It's the stillness that matters as much as where you're looking.";
+function quietEyeCueTip(gender) {
+  if (gender === "male") return "Elite male goalkeepers tend to lock that final fixation onto the throwing arm and ball. If that's your instinct too, trust it and hold it through release rather than jumping to the shooter's face or hips.";
+  if (gender === "female") return "Elite female goalkeepers tend to lock that final fixation onto the torso and head rather than the arm. If that's your instinct too, trust it and hold it through release rather than chasing the ball itself.";
+  return "Elite goalkeepers split roughly into two effective styles here: tracking the throwing arm and ball, or reading the torso and head. Notice which one you naturally do, and hold it steady through release.";
+}
+
 const LEVELS = ["Social", "Club", "State", "National", "International"];
 const DISCIPLINES = ["Indoor", "Beach", "Both"];
+// Optional, skippable, deselectable (tap the active option again to clear).
+// Never gates access to anything — only ever feeds two evidence-based
+// tailoring points (quiet-eye cue, ACL injury-prevention weighting). See
+// DECISIONS.md, "Optional gender field & grounded sex-specific content".
+const GENDER_OPTIONS = [["male", "Male"], ["female", "Female"], ["prefer_not_to_say", "Prefer not to say"]];
 const WEAKNESS_OPTIONS = [
   "Low shots", "High shots", "Near-post", "Wing shots", "6m / 1v1",
   "Penalties / shootout", "Footwork & positioning", "Distribution & fast-break",
@@ -489,11 +510,15 @@ function buildKipSystemPrompt(profile, plans, season, matches, exercises = [], a
     "Persona: knowledgeable, encouraging, direct. You speak like an experienced GK coach, not a generic fitness bot. Keep replies fairly short and practical, mobile-chat length, unless the keeper asks for depth.",
     "You must never diagnose injuries or advise training through real pain. For anything beyond mild soreness or fatigue, tell the keeper to get it looked at by a physio rather than prescribing around it.",
     "You can suggest adjustments to a session (shorter, different equipment, lower intensity, swapped exercises) in plain language. You cannot directly edit their saved plan in the app yet, so be explicit about what you're suggesting rather than implying you've changed anything.",
+    (profile.gender === "male" || profile.gender === "female")
+      ? `If relevant, you can quietly lean on two evidence-based tailoring points for this keeper — never announce or lead with gender, just let it inform the advice. (1) Quiet-eye coaching cue: research on elite handball goalkeepers (Jedziniak et al., 2025) found effective male goalkeepers tend to fixate on the throwing arm/forearm and ball, effective female goalkeepers on the torso and head — when coaching visual focus, lean toward the ${profile.gender === "male" ? "arm/ball" : "torso/head"} cue for this keeper, but the general principle (hold the fixation steady through release) applies either way. (2) Injury prevention: cutting and landing sports carry well-documented higher ACL injury risk for female athletes — ${profile.gender === "female" ? "for this keeper, lean a bit more into landing-mechanics and core/neuromuscular stability advice when relevant" : "not directly relevant for this keeper"}. Neither point changes anything else about how you coach them.`
+      : null,
     "",
     `Current season context: ${season === "Winter" ? "Winter — indoor court handball" : "Summer — beach handball"}.`,
     "",
     "KEEPER PROFILE:",
     `Level: ${profile.level || "Not set"}. Discipline: ${profile.discipline || "Not set"}.`,
+    `Gender: ${profile.gender === "male" ? "Male" : profile.gender === "female" ? "Female" : "Not set"}.`,
     `Season phase: ${profile.seasonPhase || "Not set"}. Next competition: ${profile.nextCompetition || "Not set"}.`,
     `Availability: ${profile.sessionsPerWeek || "?"} sessions/week, ~${profile.minutesPerSession || "?"} min each.`,
     `Access: ${Object.entries(profile.access || {}).filter(([, v]) => v).map(([k]) => k).join(", ") || "Not set"}.`,
@@ -770,6 +795,17 @@ function exerciseGenWeight(ex, ctx) {
     }
   }
 
+  // Gender set to female only ever supplements existing Core & Prevention
+  // volume with more of what's already there — landing/cutting-mechanics
+  // work (tagged loadAreas: knee) and general neuromuscular/core stability
+  // work — never a new or different exercise. Grounded in well-established
+  // sports science on higher ACL injury risk for female athletes in
+  // cutting/landing sports, not an assumption. See DECISIONS.md.
+  if (ctx.genderInjuryFocus && (ex.category === "Core & Prevention" || (ex.loadAreas || []).includes("knee"))) {
+    weight *= 1.4;
+    reason = reason || "Added — extra landing-mechanics/core-stability work; cutting and landing sports carry well-documented higher ACL-injury risk for female athletes.";
+  }
+
   return { weight, reason };
 }
 
@@ -809,10 +845,11 @@ function generateGoalBlock(name, season, goalId, exercises, dataContext = null) 
     const shotTypeSignal = weakestShotTypeSignal(matches, season);
     const trainingSignal = categoryTrainingSignal(plans, season, exercises);
     const anyPlateaued = pool.some((ex) => ex.type === "Gym" && isPlateaued(exerciseLogHistory(plans, ex.id, adHocSessions)));
-    const hasSignal = niggleExcluded.size > 0 || zoneSignal || shotTypeSignal || trainingSignal || anyPlateaued;
+    const genderInjuryFocus = dataContext.profile?.gender === "female";
+    const hasSignal = niggleExcluded.size > 0 || zoneSignal || shotTypeSignal || trainingSignal || anyPlateaued || genderInjuryFocus;
     if (hasSignal) {
       excludedIds = niggleExcluded;
-      ctx = { zoneSignal, shotTypeSignal, trainingSignal, plans, adHocSessions };
+      ctx = { zoneSignal, shotTypeSignal, trainingSignal, plans, adHocSessions, genderInjuryFocus };
     }
   }
 
@@ -1797,6 +1834,7 @@ export default function GKTrainerApp() {
             season={season}
             onAdd={addExercise}
             onDelete={deleteExercise}
+            profile={profile}
           />
         )}
         {tab === "plans" && (
@@ -2070,7 +2108,7 @@ function BottomNav({ tab, setTab, hasKipAlert }) {
 /* Library                                                            */
 /* ---------------------------------------------------------------- */
 
-function Library({ exercises, season, onAdd, onDelete }) {
+function Library({ exercises, season, onAdd, onDelete, profile }) {
   const [view, setView] = useState("exercises"); // exercises | notes
   const [q, setQ] = useState("");
   const [cat, setCat] = useState(null);
@@ -2102,7 +2140,7 @@ function Library({ exercises, season, onAdd, onDelete }) {
         ))}
       </div>
 
-      {view === "notes" && <AdviceHub />}
+      {view === "notes" && <AdviceHub profile={profile} />}
 
       {view === "exercises" && (
         <>
@@ -2382,6 +2420,7 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, on
     || weakestShotTypeSignal(matches || [], blockSeason)
     || categoryTrainingSignal(plans || [], blockSeason, exercises)
     || (profile?.niggles || []).some((n) => n.severity === "Significant" || !n.clearedByPhysio)
+    || profile?.gender === "female"
   );
 
   function startGoalBlock() {
@@ -2470,7 +2509,7 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, on
               <div className="text-sm font-bold" style={{ color: "#12213A" }}>Use my data</div>
               <div className="text-xs text-gray-500 mt-0.5">
                 {hasAnySignal
-                  ? "Bias exercise selection toward your weak zones, high-effort categories, and any niggles."
+                  ? "Bias exercise selection toward your weak zones, high-effort categories, any niggles, and (if set) injury-prevention emphasis."
                   : "Not enough logged matches or sessions yet to make a difference — log a few more and this will kick in automatically."}
               </div>
             </div>
@@ -4377,6 +4416,7 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, pl
   const [form, setForm] = useState({
     level: profile.level || "",
     discipline: profile.discipline || "",
+    gender: profile.gender || "",
     seasonPhase: profile.seasonPhase || "",
     nextCompetition: profile.nextCompetition || "",
     sessionsPerWeek: profile.sessionsPerWeek || 3,
@@ -4447,6 +4487,24 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, pl
             ))}
           </div>
         </Field>
+      </div>
+
+      <div className="mt-3">
+        <Field label="Gender (optional)">
+          <div className="flex gap-2">
+            {GENDER_OPTIONS.map(([val, label]) => (
+              <button
+                key={val}
+                onClick={() => setForm({ ...form, gender: form.gender === val ? "" : val })}
+                className="flex-1 py-2 rounded-lg text-xs font-bold border"
+                style={form.gender === val ? { background: "#0E8388", color: "#fff", borderColor: "#0E8388" } : { borderColor: "#DAD7CC" }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <p className="text-[10px] text-gray-400 mt-1">Skippable — only ever adds a couple of evidence-based coaching cues on top of the default, never changes what you have access to.</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 mt-3">
@@ -4843,7 +4901,7 @@ function BadgesModal({ points, earnedBadgeIds, onClose }) {
 // Header-less by design — the only caller is Library's "Coach's notes"
 // segment, whose segmented control already labels this content; a second
 // title here would just repeat it.
-function AdviceHub() {
+function AdviceHub({ profile }) {
   const [openId, setOpenId] = useState(ADVICE_TOPICS[0].id);
   return (
     <div className="px-4 pt-4 pb-6">
@@ -4854,6 +4912,9 @@ function AdviceHub() {
         {ADVICE_TOPICS.map((t) => {
           const open = openId === t.id;
           const Icon = ADVICE_ICONS[t.icon] || Lightbulb;
+          const tips = t.id === "reading"
+            ? [...t.tips, QUIET_EYE_DURATION_TIP, quietEyeCueTip(profile?.gender)]
+            : t.tips;
           return (
             <div key={t.id} className="bg-white rounded-lg border overflow-hidden" style={{ borderColor: "#DAD7CC" }}>
               <button onClick={() => setOpenId(open ? null : t.id)} className="w-full flex items-center gap-3 p-3 text-left">
@@ -4869,7 +4930,7 @@ function AdviceHub() {
               {open && (
                 <>
                   <ul className="px-3 pb-3 space-y-2">
-                    {t.tips.map((tip, i) => (
+                    {tips.map((tip, i) => (
                       <li key={i} className="flex gap-2 text-sm text-gray-700 leading-snug">
                         <span className="mt-1.5 w-1 h-1 rounded-full shrink-0" style={{ background: "#0E8388" }} />
                         {tip}
