@@ -1761,8 +1761,21 @@ export default function GKTrainerApp() {
     updateAndSave({ nextGeneralUploads: generalUploads.filter((f) => f.path !== path) });
   }
 
-  function addReport(report) {
-    updateAndSave({ nextReports: [...reports, report] });
+  // Report + the "Kip did this" chat message both need to land in the same
+  // updateAndSave call — calling saveKipMessages and a separate addReport
+  // back-to-back each closes over the other's stale pre-update value (since
+  // neither has re-rendered yet), so the second call silently wins and wipes
+  // out whichever field the first call touched. One call, both fields.
+  function addReportAndNotify(report) {
+    updateAndSave({
+      nextReports: [...reports, report],
+      nextKip: [...kipMessages, {
+        role: "assistant",
+        content: "Put together a report on your last stretch of training and matches — worth a look.",
+        ts: Date.now(),
+        action: { type: "report_generated", reportId: report.id },
+      }],
+    });
   }
 
   // Confirmed PT/physio exercises always become new custom exercises tagged
@@ -1922,9 +1935,7 @@ export default function GKTrainerApp() {
             onOpenLiveRecorder={setActiveLiveTarget}
             profile={profile}
             reports={reports}
-            onAddReport={addReport}
-            kipMessages={kipMessages}
-            onSaveMessages={saveKipMessages}
+            onReportGenerated={addReportAndNotify}
           />
         )}
         {tab === "kip" && (
@@ -6199,7 +6210,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, reports = [], onAddReport, kipMessages, onSaveMessages }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, reports = [], onReportGenerated }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [showLiveForm, setShowLiveForm] = useState(false);
@@ -6213,13 +6224,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
     setReportError(null);
     try {
       const report = await generateKipReport({ profile, plans, season, matches, exercises, adHocSessions });
-      onAddReport(report);
-      onSaveMessages([...kipMessages, {
-        role: "assistant",
-        content: "Put together a report on your last stretch of training and matches — worth a look.",
-        ts: Date.now(),
-        action: { type: "report_generated", reportId: report.id },
-      }]);
+      onReportGenerated(report);
       setOpenReportId(report.id);
     } catch (e) {
       setReportError("Couldn't generate a report just now — try again.");
