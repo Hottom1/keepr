@@ -46,6 +46,27 @@ export default async (req, context) => {
     return new Response(JSON.stringify({ received: false }), { status: 200 });
   }
 
+  // TEMPORARY diagnostic — real ImprovMX deliveries confirmed via their own
+  // Logs tab, but no suggestion was ever appearing, meaning the assumed
+  // payload shape (from their docs, not a real payload) doesn't match what
+  // they actually send. Dumps the raw shape into the known dev account so
+  // it can be inspected, then this block gets removed once the real shape
+  // is confirmed. Never touches real user data — separate debug field.
+  try {
+    await appendPendingCalendarSuggestion("3906ebe8-7992-4d8e-a8c4-2cbeae2e835e", {
+      id: uid(),
+      createdAt: new Date().toISOString(),
+      source: "DEBUG_RAW_PAYLOAD",
+      title: "DEBUG",
+      date: "2026-01-01",
+      time: null,
+      location: null,
+      emailSubject: JSON.stringify(payload).slice(0, 1900),
+    });
+  } catch (e) {
+    console.error("debug capture failed", e.message);
+  }
+
   const recipient = (payload.to?.[0]?.email || payload.headers?.["Delivered-To"] || "").toLowerCase().trim();
   if (!recipient) return new Response(JSON.stringify({ received: true }), { status: 200 });
 
