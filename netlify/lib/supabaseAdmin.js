@@ -73,3 +73,27 @@ export async function getUserEmailById(userId) {
   if (error) throw error;
   return data?.user?.email || null;
 }
+
+// One listUsers() call instead of N getUserById() calls when the scheduled
+// alerts job needs every account's email — Supabase's admin API paginates
+// at 50/page by default, which comfortably covers this app's real scale;
+// revisit if the user base ever grows past that.
+export async function getAllUserEmails() {
+  const { data, error } = await getSupabaseAdmin().auth.admin.listUsers();
+  if (error) throw error;
+  const map = {};
+  for (const u of data.users) map[u.id] = u.email;
+  return map;
+}
+
+// Same atomic-append discipline as appendPendingCalendarSuggestion — see
+// supabase/migrations/0004_email_alert_atomics.sql.
+export async function appendEmailAlertLog(userId, entries) {
+  const { error } = await getSupabaseAdmin().rpc("append_email_alert_log", { p_user_id: userId, p_entries: entries });
+  if (error) throw error;
+}
+
+export async function setAlertsEnabled(userId, enabled) {
+  const { error } = await getSupabaseAdmin().rpc("set_alerts_enabled", { p_user_id: userId, p_enabled: enabled });
+  if (error) throw error;
+}
