@@ -549,6 +549,14 @@ export default function GKTrainerApp() {
     updateAndSave({ nextPendingCalendarSuggestions: pendingCalendarSuggestions.filter((s) => s.id !== id) });
   }
 
+  // One updateAndSave for the whole reviewed batch from a season-schedule
+  // upload — every match ScheduleReviewModal hands back has already been
+  // reviewed and deselected/edited by the keeper, so this is a single bulk
+  // append, not one save per row.
+  function bulkAddMatches(newMatches) {
+    updateAndSave({ nextMatches: [...matches, ...newMatches] });
+  }
+
   // Confirmed PT/physio exercises always become new custom exercises tagged
   // source: "physio" — never silently merged into Keepr's own curated
   // library — placed verbatim into either a new session in an existing
@@ -693,6 +701,8 @@ export default function GKTrainerApp() {
             generalUploads={generalUploads}
             onAddGeneralUpload={addGeneralUpload}
             onRemoveGeneralUpload={removeGeneralUpload}
+            season={season}
+            onBulkAddMatches={bulkAddMatches}
           />
         )}
         {tab === "stats" && (
@@ -3171,6 +3181,105 @@ function PendingCalendarReviewModal({ suggestions, season, onClose, onConfirm, o
   );
 }
 
+// Bulk sibling of PendingCalendarReviewModal — same "read it, show it,
+// never commit silently" discipline, but a whole fixture list at once
+// rather than one event. The brief's explicit requirement is "let the
+// keeper deselect any that got misread rather than accept-all-or-
+// reject-all," so every row starts checked and can be individually
+// unchecked or edited, never an all-or-nothing accept. The file itself is
+// read directly in the browser and never uploaded to storage — unlike a PT
+// plan, there's no reason to keep a season schedule file around after its
+// fixtures have been reviewed and added.
+function ScheduleReviewModal({ file, season, onClose, onConfirmed }) {
+  const [status, setStatus] = useState("loading"); // loading | ready | failed
+  const [rows, setRows] = useState([]);
+  const [reason, setReason] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await extractScheduleFromFile(file);
+        if (result.looksLikeSchedule && result.fixtures.length > 0) {
+          setRows(result.fixtures.map((f) => ({
+            id: uid(),
+            selected: true,
+            date: f.date || "",
+            opponent: f.opponent || "",
+            competition: f.competition || "",
+          })));
+          setStatus("ready");
+        } else {
+          setReason(result.reason || "This didn't look like a fixture list Kip could read confidently.");
+          setStatus("failed");
+        }
+      } catch (e) {
+        setReason("Couldn't read this file automatically.");
+        setStatus("failed");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function updateRow(id, patch) {
+    setRows(rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  const selectedCount = rows.filter((r) => r.selected && r.date && r.opponent.trim()).length;
+
+  function confirm() {
+    const matches = rows
+      .filter((r) => r.selected && r.date && r.opponent.trim())
+      .map((r) => ({ id: uid(), date: r.date, opponent: r.opponent.trim(), competition: r.competition.trim(), result: "", season, videoUrl: "", shots: [] }));
+    onConfirmed(matches);
+  }
+
+  return (
+    <Modal onClose={onClose}>
+      {status === "loading" && (
+        <div className="py-8 text-center">
+          <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Reading your schedule with Kip…</div>
+          <div className="text-xs text-gray-500">This can take a few seconds.</div>
+        </div>
+      )}
+
+      {status === "failed" && (
+        <div>
+          <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Couldn't read this automatically</h3>
+          <p className="text-sm text-gray-600 mb-4">{reason}</p>
+          <button onClick={onClose} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Close</button>
+        </div>
+      )}
+
+      {status === "ready" && (
+        <div>
+          <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Review the fixtures</h3>
+          <p className="text-xs text-gray-500 mb-3">Found {rows.length} — uncheck any that got misread, or fix a date/name directly. Nothing's added until you confirm.</p>
+          <div className="space-y-2 mb-3 max-h-96 overflow-y-auto">
+            {rows.map((r) => (
+              <div key={r.id} className="bg-white rounded-lg border p-2.5 flex gap-2" style={{ borderColor: r.selected ? "#0E8388" : "#DAD7CC" }}>
+                <button onClick={() => updateRow(r.id, { selected: !r.selected })} className="shrink-0 pt-1">
+                  {r.selected ? <CheckCircle2 size={18} color="#0E8388" /> : <Circle size={18} color="#DAD7CC" />}
+                </button>
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <input className="input" placeholder="Opponent" value={r.opponent} onChange={(e) => updateRow(r.id, { opponent: e.target.value })} />
+                  <div className="flex gap-1.5">
+                    <input type="date" className="input flex-1" value={r.date} onChange={(e) => updateRow(r.id, { date: e.target.value })} />
+                    <input className="input flex-1" placeholder="Competition (optional)" value={r.competition} onChange={(e) => updateRow(r.id, { competition: e.target.value })} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button disabled={selectedCount === 0} onClick={confirm} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+            Add {selectedCount} {selectedCount === 1 ? "match" : "matches"}
+          </button>
+          <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.5rem 0.6rem;font-size:0.8rem;outline:none;}`}</style>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 // Extraction runs automatically on mount (the file was already uploaded by
 // the caller) with a visible loading state — never silent. Nothing is
 // committed to a block until the keeper reviews, edits, and confirms; a
@@ -3344,13 +3453,15 @@ function PtPlanReviewModal({ file, plans, onClose, onConfirmed }) {
 // from inside a niggle's own detail view. Reuses PtPlanReviewModal/
 // extractPtPlanFromFile so there's one extraction path, not a second one
 // duplicated for this screen.
-function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, plans, onApplyPtPlan, onBack }) {
+function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, plans, onApplyPtPlan, season, onBulkAddMatches, onBack }) {
   const niggles = profile.niggles || [];
   const [uploading, setUploading] = useState(false);
   const [fileError, setFileError] = useState(null);
   const [linkTo, setLinkTo] = useState("general");
   const [extracting, setExtracting] = useState(null); // { file, sourceNiggleId }
+  const [extractingSchedule, setExtractingSchedule] = useState(null); // raw File
   const fileInputRef = React.useRef(null);
+  const scheduleInputRef = React.useRef(null);
 
   const rows = [
     ...niggles.flatMap((n) => (n.files || []).map((f) => ({ ...f, tag: n.part || "Niggle", niggleId: n.id }))),
@@ -3427,6 +3538,25 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
         <p className="text-[10px] text-gray-400 mt-1.5">A PDF or image gets read automatically for exercises you can review and add to a block; nothing is scheduled without your confirmation.</p>
       </div>
 
+      <div className="bg-white rounded-lg border p-3 mb-5" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Season schedule</div>
+        <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
+          <CalendarRange size={13} /> Upload fixture list
+          <input
+            ref={scheduleInputRef}
+            type="file"
+            accept="application/pdf,image/*,.csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) setExtractingSchedule(file);
+              if (scheduleInputRef.current) scheduleInputRef.current.value = "";
+            }}
+          />
+        </label>
+        <p className="text-[10px] text-gray-400 mt-1.5">A PDF, spreadsheet, or photo of a printed schedule — Kip reads every fixture and shows you the whole list to review, edit, or deselect before anything's added.</p>
+      </div>
+
       <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">All files ({rows.length})</div>
       <div className="space-y-1.5">
         {rows.map((f) => (
@@ -3455,6 +3585,18 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
           }}
         />
       )}
+
+      {extractingSchedule && (
+        <ScheduleReviewModal
+          file={extractingSchedule}
+          season={season}
+          onClose={() => setExtractingSchedule(null)}
+          onConfirmed={(matches) => {
+            onBulkAddMatches(matches);
+            setExtractingSchedule(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -3465,7 +3607,7 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
 // overlay, since it's now scoped to this tab rather than floating above all
 // of them. onCancel is deliberately omitted from KipOnboarding here: there's
 // no other screen to cancel back to, Profile IS the destination.
-function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload }) {
+function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, season, onBulkAddMatches }) {
   const [showUploads, setShowUploads] = useState(false);
 
   if (showUploads) {
@@ -3478,6 +3620,8 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
         onRemoveGeneralUpload={onRemoveGeneralUpload}
         plans={plans}
         onApplyPtPlan={onApplyPtPlan}
+        season={season}
+        onBulkAddMatches={onBulkAddMatches}
         onBack={() => setShowUploads(false)}
       />
     );
@@ -3898,6 +4042,83 @@ async function extractPtPlanFromFile(file) {
     };
   } catch (e) {
     return { looksLikePlan: false, exercises: [], reason: "Kip's response wasn't in the expected format." };
+  }
+}
+
+const SCHEDULE_EXTRACTION_PROMPT = `You are reading an uploaded season fixture list for a handball goalkeeper's team — could be a PDF, a photo of a printed schedule, or a table of rows extracted from a spreadsheet. Extract every dated match/fixture you can find. Respond with ONLY a single JSON object, no other text before or after it, in exactly this shape:
+
+{"looksLikeSchedule": boolean, "fixtures": [{"date": "YYYY-MM-DD", "opponent": string, "competition": string}], "reason": string or null}
+
+- "looksLikeSchedule" is true only if this genuinely looks like a fixture list with multiple dated matches — not a single invite (that's a different flow), not an unrelated document.
+- "date" must be a real calendar date in YYYY-MM-DD form for every fixture — infer the year from context (a season header, other dated rows, etc.) if a row only gives day/month.
+- "opponent" is the team name as written. "competition" is the league/competition/round if stated, otherwise an empty string — never invent one.
+- If it's illegible, low quality, or doesn't look like a fixture list at all, set "looksLikeSchedule" to false, leave "fixtures" as an empty array, and give a short plain-English reason.
+- Never invent a fixture, a date, or an opponent that isn't actually on the page. Skip a row rather than guess if a date genuinely can't be determined.`;
+
+// Spreadsheet rows are already unambiguous, structured text — turning them
+// into a document/image block for Claude to re-read visually would throw
+// away that structure for no benefit, so this path sends plain text
+// instead. XLSX is a binary zip/OOXML format that genuinely needs a real
+// parser (not hand-rolled, unlike the plain-text .ics parser elsewhere in
+// this build); CSV is already text, so it's sent as-is with no library.
+async function spreadsheetToText(file) {
+  if (file.type === "text/csv" || /\.csv$/i.test(file.name)) {
+    return await file.text();
+  }
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await file.arrayBuffer());
+  const sheet = workbook.worksheets[0];
+  if (!sheet) return "";
+  const lines = [];
+  sheet.eachRow((row) => {
+    lines.push(row.values.slice(1).map((v) => (v == null ? "" : String(v))).join("\t"));
+  });
+  return lines.join("\n");
+}
+
+// Mirrors extractPtPlanFromFile's shape (same proxy call, same "never
+// throws for a not-a-schedule case" contract) but branches on file type
+// first: PDF/image go through Claude's vision/document input exactly like
+// a PT plan upload; spreadsheets are parsed locally first and sent as
+// plain text, since there's no vision step needed for already-structured
+// rows.
+async function extractScheduleFromFile(file) {
+  const isSpreadsheet = /\.(xlsx|xls|csv)$/i.test(file.name) || file.type === "text/csv" || file.type.includes("spreadsheet");
+  let content;
+  if (isSpreadsheet) {
+    const text = await spreadsheetToText(file);
+    content = [{ type: "text", text: `Here is the fixture list, extracted from a spreadsheet as tab-separated rows:\n\n${text.slice(0, 12000)}` }];
+  } else {
+    const base64 = await fileToBase64(file);
+    const isPdf = file.type === "application/pdf";
+    const contentBlock = isPdf
+      ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } }
+      : { type: "image", source: { type: "base64", media_type: file.type, data: base64 } };
+    content = [contentBlock, { type: "text", text: "Extract the fixtures from this document as instructed." }];
+  }
+  const { data: { session } } = await supabase.auth.getSession();
+  const response = await fetch("/.netlify/functions/kip-chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session?.access_token}`,
+    },
+    body: JSON.stringify({ system: SCHEDULE_EXTRACTION_PROMPT, messages: [{ role: "user", content }], maxTokens: 4000 }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Extraction request failed");
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : text);
+    return {
+      looksLikeSchedule: !!parsed.looksLikeSchedule,
+      fixtures: Array.isArray(parsed.fixtures) ? parsed.fixtures : [],
+      reason: parsed.reason || null,
+    };
+  } catch (e) {
+    return { looksLikeSchedule: false, fixtures: [], reason: "Kip's response wasn't in the expected format." };
   }
 }
 
