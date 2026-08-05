@@ -43,11 +43,14 @@ export async function saveUserRowById(userId, nextData) {
   if (error) throw error;
 }
 
+// inboundAlias lives at profile.inboundAlias (Profile owns it, alongside
+// the rest of a keeper's account-level settings) — not a top-level field of
+// the data blob, so the JSON path has to traverse through "profile" first.
 export async function findUserRowByInboundAlias(alias) {
   const { data, error } = await getSupabaseAdmin()
     .from("user_data")
     .select("user_id, data")
-    .eq("data->>inboundAlias", alias)
+    .eq("data->profile->>inboundAlias", alias)
     .maybeSingle();
   if (error) throw error;
   return data;

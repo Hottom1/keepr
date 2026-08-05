@@ -370,6 +370,11 @@ export default function GKTrainerApp() {
   // point in time, not something that should silently change if later
   // training data shifts the underlying numbers.
   const [reports, setReports] = useState([]);
+  // Written server-side by netlify/functions/email-inbound.js (service-role,
+  // bypasses this client entirely) whenever a forwarded match/training email
+  // parses into something calendar-shaped. Never auto-committed to a Match
+  // or AdHocSession — only ever reviewed and confirmed here, in Plans.
+  const [pendingCalendarSuggestions, setPendingCalendarSuggestions] = useState([]);
   // Which live recorder overlay is currently shown (null = none). Lifted to
   // App level, not owned by Plans/Stats/Record individually, so starting a
   // recording from any one of them is immediately visible/resumable from the
@@ -394,6 +399,7 @@ export default function GKTrainerApp() {
           setOpponents(parsed.opponents || []);
           setGeneralUploads(parsed.generalUploads || []);
           setReports(parsed.reports || []);
+          setPendingCalendarSuggestions(parsed.pendingCalendarSuggestions || []);
 
           const active = findActiveRecording({ plans: parsed.plans, adHocSessions: parsed.adHocSessions, matches: parsed.matches });
           if (active) setActiveLiveTarget(active);
@@ -422,7 +428,7 @@ export default function GKTrainerApp() {
     return computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises: allExercises }).length > 0;
   }, [profile, plans, adHocSessions, matches, season, allExercises]);
 
-  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGeneralUploads = generalUploads, nextReports = reports }) {
+  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGeneralUploads = generalUploads, nextReports = reports, nextPendingCalendarSuggestions = pendingCalendarSuggestions }) {
     setCustomExercises(nextCustom);
     setPlans(nextPlans);
     setSeason(nextSeason);
@@ -433,7 +439,8 @@ export default function GKTrainerApp() {
     setOpponents(nextOpponents);
     setGeneralUploads(nextGeneralUploads);
     setReports(nextReports);
-    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, generalUploads: nextGeneralUploads, reports: nextReports });
+    setPendingCalendarSuggestions(nextPendingCalendarSuggestions);
+    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, generalUploads: nextGeneralUploads, reports: nextReports, pendingCalendarSuggestions: nextPendingCalendarSuggestions });
   }
 
   function addExercise(ex) {
@@ -516,6 +523,30 @@ export default function GKTrainerApp() {
         action: { type: "report_generated", reportId: report.id },
       }],
     });
+  }
+
+  // Same atomic-update discipline as addReportAndNotify above: removing the
+  // suggestion and creating the real Match/AdHocSession both have to land
+  // in one updateAndSave call, not two, or the second call's stale closure
+  // silently reverts whichever field the first call touched. Match has no
+  // location field in its existing schema (MatchFormModal never collected
+  // one), so a reviewed location is kept for training sessions (folded into
+  // notes) but not persisted for matches — not worth inventing a new field
+  // for a value the keeper already saw and confirmed once in the review
+  // step.
+  function confirmCalendarSuggestion(suggestion, fields) {
+    const nextPending = pendingCalendarSuggestions.filter((s) => s.id !== suggestion.id);
+    if (fields.kind === "match") {
+      const match = { id: uid(), date: fields.date, opponent: fields.title, competition: "", result: "", season, videoUrl: "", shots: [] };
+      updateAndSave({ nextMatches: [...matches, match], nextPendingCalendarSuggestions: nextPending });
+    } else {
+      const session = { id: uid(), title: fields.title, notes: fields.location ? `Location: ${fields.location}` : "", date: fields.date, exerciseIds: [], completed: false, rpe: null, note: "", completedAt: null };
+      updateAndSave({ nextAdHoc: [...adHocSessions, session], nextPendingCalendarSuggestions: nextPending });
+    }
+  }
+
+  function discardCalendarSuggestion(id) {
+    updateAndSave({ nextPendingCalendarSuggestions: pendingCalendarSuggestions.filter((s) => s.id !== id) });
   }
 
   // Confirmed PT/physio exercises always become new custom exercises tagged
@@ -632,6 +663,9 @@ export default function GKTrainerApp() {
             onOpenLiveRecorder={setActiveLiveTarget}
             kipMessages={kipMessages}
             onSaveMessages={saveKipMessages}
+            pendingCalendarSuggestions={pendingCalendarSuggestions}
+            onConfirmCalendarSuggestion={confirmCalendarSuggestion}
+            onDiscardCalendarSuggestion={discardCalendarSuggestion}
           />
         )}
         {tab === "record" && (
@@ -1677,7 +1711,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -1690,6 +1724,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
   const [adHocLogTarget, setAdHocLogTarget] = useState(null); // adHocSession
   const [confirmDeleteAdHoc, setConfirmDeleteAdHoc] = useState(null);
   const [matchFormDate, setMatchFormDate] = useState(null); // date string, non-null means "open match form"
+  const [reviewingSuggestion, setReviewingSuggestion] = useState(false);
 
   const editingPlan = plans.find((p) => p.id === editingId);
   if (editingPlan) {
@@ -1727,6 +1762,22 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
 
   return (
     <div className="px-4 pt-4 pb-6 space-y-3">
+      {pendingCalendarSuggestions.length > 0 && (
+        <button
+          onClick={() => setReviewingSuggestion(true)}
+          className="w-full flex items-center justify-between rounded-lg border-2 p-3"
+          style={{ borderColor: "#0E8388", background: "#fff" }}
+        >
+          <div className="flex items-center gap-2">
+            <Paperclip size={15} color="#0E8388" />
+            <span className="text-sm font-bold" style={{ color: "#12213A" }}>
+              {pendingCalendarSuggestions.length} forwarded {pendingCalendarSuggestions.length === 1 ? "item" : "items"} to review
+            </span>
+          </div>
+          <ChevronRight size={16} color="#0E8388" />
+        </button>
+      )}
+
       <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: "#DAD7CC" }}>
         {[["list", "List"], ["calendar", "Calendar"]].map(([id, label]) => (
           <button
@@ -1739,6 +1790,16 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
           </button>
         ))}
       </div>
+
+      {reviewingSuggestion && (
+        <PendingCalendarReviewModal
+          suggestions={pendingCalendarSuggestions}
+          season={season}
+          onClose={() => setReviewingSuggestion(false)}
+          onConfirm={onConfirmCalendarSuggestion}
+          onDiscard={onDiscardCalendarSuggestion}
+        />
+      )}
 
       {view === "calendar" ? (
         <CalendarView
@@ -3022,6 +3083,89 @@ function NiggleDetailModal({ niggle, exercises, plans, onClose, onSave, onApplyP
           }}
         />
       )}
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+    </Modal>
+  );
+}
+
+// One item at a time, not a bulk list — a forwarded email is a single
+// event, unlike the season-schedule bulk upload's per-row-deselect list.
+// Never writes a Match or AdHocSession directly; onConfirm hands the
+// reviewed, keeper-edited fields back up so the actual create happens
+// through the app's existing saveMatch/saveAdHocSession paths, same as if
+// the keeper had filled the form in by hand.
+function PendingCalendarReviewModal({ suggestions, season, onClose, onConfirm, onDiscard }) {
+  const [index, setIndex] = useState(0);
+  const current = suggestions[index];
+  const [kind, setKind] = useState(current?.suggestedKind || "match");
+  const [title, setTitle] = useState(current ? current.title.replace(/^\s*vs?\.?\s+/i, "") : "");
+  const [date, setDate] = useState(current?.date || "");
+  const [location, setLocation] = useState(current?.location || "");
+
+  useEffect(() => {
+    if (!current) return;
+    setKind(current.suggestedKind || "match");
+    setTitle(current.title.replace(/^\s*vs?\.?\s+/i, ""));
+    setDate(current.date || "");
+    setLocation(current.location || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id]);
+
+  if (!current) {
+    onClose();
+    return null;
+  }
+
+  function advance() {
+    if (index + 1 < suggestions.length) setIndex(index + 1);
+    else onClose();
+  }
+
+  function confirm() {
+    onConfirm(current, { kind, title: title.trim(), date, location: location.trim() });
+    advance();
+  }
+
+  function discard() {
+    onDiscard(current.id);
+    advance();
+  }
+
+  const valid = title.trim() && date;
+
+  return (
+    <Modal onClose={onClose}>
+      <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Review forwarded item</h3>
+      <p className="text-xs text-gray-500 mb-3">
+        From "{current.emailSubject || "forwarded email"}" — {current.source === "ics" ? "read from the calendar invite" : "read from the email text"}. Check this matches before adding it.
+        {suggestions.length > 1 && ` (${index + 1} of ${suggestions.length})`}
+      </p>
+      <div className="space-y-3">
+        <Field label="Is this a match or training session?">
+          <div className="flex gap-2">
+            {["match", "training"].map((k) => (
+              <button key={k} onClick={() => setKind(k)} className="flex-1 py-2 rounded-lg text-xs font-bold border capitalize" style={kind === k ? { background: "#12213A", color: "#fff", borderColor: "#12213A" } : { borderColor: "#DAD7CC" }}>
+                {k === "match" ? "Match" : "Training"}
+              </button>
+            ))}
+          </div>
+        </Field>
+        <Field label={kind === "match" ? "Opponent" : "Title"}>
+          <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={kind === "match" ? "e.g. North Shore" : "e.g. Training session"} />
+        </Field>
+        <Field label="Date">
+          <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Location (optional)">
+          <input className="input" value={location} onChange={(e) => setLocation(e.target.value)} />
+        </Field>
+      </div>
+      <div className="flex gap-2 mt-4">
+        <button onClick={discard} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Discard</button>
+        <button disabled={!valid} onClick={confirm} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+          {kind === "match" ? "Add match" : "Add session"}
+        </button>
+      </div>
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
     </Modal>
   );
