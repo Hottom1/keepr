@@ -28,7 +28,7 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400 });
   }
 
-  const { system, messages, maxTokens } = body;
+  const { system, messages, maxTokens, tools, tool_choice } = body;
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response(JSON.stringify({ error: "messages must be a non-empty array" }), { status: 400 });
   }
@@ -52,6 +52,12 @@ export default async (req) => {
       max_tokens: maxTokens || 1000,
       system,
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      // Forwarded verbatim, same trust boundary as system/messages above —
+      // the client already fully controls what goes into this request, tool
+      // definitions are no different. Tools are always executed client-side
+      // against real local app state, never on the server.
+      ...(tools ? { tools } : {}),
+      ...(tool_choice ? { tool_choice } : {}),
     }),
   });
 

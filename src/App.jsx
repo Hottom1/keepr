@@ -1623,6 +1623,13 @@ export default function GKTrainerApp() {
   // public-profile sharing feature is ever built, it must never be included
   // in whatever gets shared. See DECISIONS.md, "Injury/rehab data privacy".
   const [generalUploads, setGeneralUploads] = useState([]);
+  // Persisted Kip-generated progress reports — {id, createdAt, season, data,
+  // narrative}. `data` is real computed output from the same aggregation
+  // functions Stats itself uses, `narrative` is Kip's own phrasing of it.
+  // Lives here rather than being derived, since a report is a snapshot of a
+  // point in time, not something that should silently change if later
+  // training data shifts the underlying numbers.
+  const [reports, setReports] = useState([]);
   // Which live recorder overlay is currently shown (null = none). Lifted to
   // App level, not owned by Plans/Stats/Record individually, so starting a
   // recording from any one of them is immediately visible/resumable from the
@@ -1646,6 +1653,7 @@ export default function GKTrainerApp() {
           setAdHocSessions(parsed.adHocSessions || []);
           setOpponents(parsed.opponents || []);
           setGeneralUploads(parsed.generalUploads || []);
+          setReports(parsed.reports || []);
 
           const active = findActiveRecording({ plans: parsed.plans, adHocSessions: parsed.adHocSessions, matches: parsed.matches });
           if (active) setActiveLiveTarget(active);
@@ -1674,7 +1682,7 @@ export default function GKTrainerApp() {
     return computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises: allExercises }).length > 0;
   }, [profile, plans, adHocSessions, matches, season, allExercises]);
 
-  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGeneralUploads = generalUploads }) {
+  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGeneralUploads = generalUploads, nextReports = reports }) {
     setCustomExercises(nextCustom);
     setPlans(nextPlans);
     setSeason(nextSeason);
@@ -1684,7 +1692,8 @@ export default function GKTrainerApp() {
     setAdHocSessions(nextAdHoc);
     setOpponents(nextOpponents);
     setGeneralUploads(nextGeneralUploads);
-    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, generalUploads: nextGeneralUploads });
+    setReports(nextReports);
+    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, generalUploads: nextGeneralUploads, reports: nextReports });
   }
 
   function addExercise(ex) {
@@ -1720,6 +1729,15 @@ export default function GKTrainerApp() {
     updateAndSave({ nextKip: msgs });
   }
 
+  // "Open full chat" from a live recorder's quick-tap panel: minimize the
+  // recorder (same as tapping Minimize itself — the in-progress recording
+  // isn't touched, just no longer covering the screen) and land on Kip's
+  // own tab, so it's the exact same conversation thread, not a second one.
+  function onOpenKip() {
+    setActiveLiveTarget(null);
+    setTab("kip");
+  }
+
   function saveMatch(match) {
     const exists = matches.some((m) => m.id === match.id);
     const next = exists ? matches.map((m) => (m.id === match.id ? match : m)) : [...matches, match];
@@ -1741,6 +1759,10 @@ export default function GKTrainerApp() {
 
   function removeGeneralUpload(path) {
     updateAndSave({ nextGeneralUploads: generalUploads.filter((f) => f.path !== path) });
+  }
+
+  function addReport(report) {
+    updateAndSave({ nextReports: [...reports, report] });
   }
 
   // Confirmed PT/physio exercises always become new custom exercises tagged
@@ -1855,6 +1877,8 @@ export default function GKTrainerApp() {
             opponents={opponents}
             onSaveOpponentRoster={saveOpponentRoster}
             onOpenLiveRecorder={setActiveLiveTarget}
+            kipMessages={kipMessages}
+            onSaveMessages={saveKipMessages}
           />
         )}
         {tab === "record" && (
@@ -1896,6 +1920,11 @@ export default function GKTrainerApp() {
             opponents={opponents}
             onSaveOpponentRoster={saveOpponentRoster}
             onOpenLiveRecorder={setActiveLiveTarget}
+            profile={profile}
+            reports={reports}
+            onAddReport={addReport}
+            kipMessages={kipMessages}
+            onSaveMessages={saveKipMessages}
           />
         )}
         {tab === "kip" && (
@@ -1909,6 +1938,8 @@ export default function GKTrainerApp() {
             matches={matches}
             exercises={allExercises}
             adHocSessions={adHocSessions}
+            opponents={opponents}
+            onSavePlan={savePlan}
             onApplyPtPlan={applyPtPlanToBlock}
             onOpenProfile={() => setTab("profile")}
           />
@@ -1925,6 +1956,12 @@ export default function GKTrainerApp() {
             kind="plan"
             exercises={allExercises}
             focus={activeLiveTarget.focus}
+            profile={profile}
+            season={season}
+            plans={plans}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            onOpenKip={onOpenKip}
             onUpdatePatch={(patch) => {
               const next = {
                 ...livePlan,
@@ -1972,6 +2009,12 @@ export default function GKTrainerApp() {
             kind="adhoc"
             exercises={allExercises}
             focus={activeLiveTarget.focus}
+            profile={profile}
+            season={season}
+            plans={plans}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            onOpenKip={onOpenKip}
             onUpdatePatch={(patch) => saveAdHocSession({ ...liveSession, ...patch })}
             onFinish={({ rpe, note, durationMinutes, exerciseLogs }) => {
               const { recording, ...rest } = liveSession;
@@ -1994,6 +2037,13 @@ export default function GKTrainerApp() {
           <LiveMatchRecorder
             match={liveMatch}
             opponents={opponents}
+            profile={profile}
+            season={season}
+            plans={plans}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            exercises={allExercises}
+            onOpenKip={onOpenKip}
             onUpdatePatch={(patch) => saveMatch({ ...liveMatch, ...patch })}
             onFinish={(patch) => {
               const { recording, ...rest } = liveMatch;
@@ -2403,7 +2453,7 @@ function Modal({ onClose, children }) {
 /* Builder                                                            */
 /* ---------------------------------------------------------------- */
 
-function Builder({ exercises, season, profile, matches, plans, adHocSessions, onSave, onBack }) {
+function Builder({ exercises, season, profile, matches, plans, adHocSessions, opponents = [], kipMessages = [], onSaveMessages, onSave, onBack }) {
   const [step, setStep] = useState("setup");
   const [name, setName] = useState("");
   const [blockSeason, setBlockSeason] = useState(season);
@@ -2412,6 +2462,7 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, on
   const [sessionsPerWeek, setSessionsPerWeek] = useState(3);
   const [useData, setUseData] = useState(false);
   const [draft, setDraft] = useState(null);
+  const [showKipSheet, setShowKipSheet] = useState(false);
 
   // Same eligibility checks generateGoalBlock itself runs — shown here only
   // so the toggle can be honest about whether it'll actually change anything,
@@ -2483,14 +2534,42 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, on
             <div className="text-xs text-gray-500">Auto-built 6 weeks, progressive, fully editable after</div>
           </div>
         </button>
-        <button onClick={() => setMethod("freeform")} className="w-full text-left bg-white rounded-lg border p-3 flex items-center gap-3" style={{ borderColor: method === "freeform" ? "#0E8388" : "#DAD7CC", borderWidth: method === "freeform" ? 2 : 1 }}>
+        <button onClick={() => setMethod("freeform")} className="w-full text-left bg-white rounded-lg border p-3 mb-2 flex items-center gap-3" style={{ borderColor: method === "freeform" ? "#0E8388" : "#DAD7CC", borderWidth: method === "freeform" ? 2 : 1 }}>
           <Pencil size={18} color="#0E8388" />
           <div>
             <div className="font-bold text-sm">Build from scratch</div>
             <div className="text-xs text-gray-500">Pick every exercise yourself, week by week</div>
           </div>
         </button>
+        <button onClick={() => { setMethod("kip"); setShowKipSheet(true); }} className="w-full text-left bg-white rounded-lg border p-3 flex items-center gap-3" style={{ borderColor: method === "kip" ? "#0E8388" : "#DAD7CC", borderWidth: method === "kip" ? 2 : 1 }}>
+          <Sparkles size={18} color="#0E8388" />
+          <div>
+            <div className="font-bold text-sm">Build with Kip</div>
+            <div className="text-xs text-gray-500">Tell it what you need in plain language — "beach block, my shoulder's a bit sore"</div>
+          </div>
+        </button>
       </div>
+
+      {showKipSheet && (
+        <KipAssistantSheet
+          profile={profile}
+          messages={kipMessages}
+          onSaveMessages={onSaveMessages}
+          plans={plans}
+          season={blockSeason}
+          matches={matches}
+          exercises={exercises}
+          adHocSessions={adHocSessions}
+          opponents={opponents}
+          onSavePlan={() => {}}
+          onBlockBuilt={(block) => {
+            setDraft(block);
+            setStep("edit");
+            setShowKipSheet(false);
+          }}
+          onClose={() => setShowKipSheet(false)}
+        />
+      )}
 
       {method === "goal" && (
         <div className="mt-4">
@@ -2847,7 +2926,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2882,6 +2961,9 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
         matches={matches}
         plans={plans}
         adHocSessions={adHocSessions}
+        opponents={opponents}
+        kipMessages={kipMessages}
+        onSaveMessages={onSaveMessages}
         onSave={(plan) => { onSave(plan); setShowBuilder(false); }}
         onBack={() => setShowBuilder(false)}
       />
@@ -3613,12 +3695,105 @@ function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete
 // the same object the rest of the app already saves, not a parallel one —
 // so closing or backgrounding the tab never loses progress: reopening just
 // finds the same in-progress session and picks up where it left off.
-function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, onFinish, onExit, onDelete }) {
+// Chip-only, no text input — "quick-tap, not conversational" per the brief.
+// Each chip computes real data client-side from what's already logged (this
+// match's own shots so far, or this session's own progress), then makes one
+// plain, non-tool callKip request asking Kip to phrase it — same "compute
+// then narrate" shape as alerts and reports, not a third pattern. The note
+// is ephemeral (not persisted into kipMessages); "open full chat" is the
+// escape hatch into the same shared conversation thread if the keeper
+// actually wants to talk something through instead of glance at it.
+function KipQuickPanel({ kind, doneCount, totalItems, match, opponents = [], profile, season, plans, matches, adHocSessions, exercises, onClose, onOpenKip }) {
+  const [loadingChip, setLoadingChip] = useState(null);
+  const [note, setNote] = useState(null);
+  const [noteError, setNoteError] = useState(null);
+
+  const roster = kind === "match" ? findOpponentRoster(opponents, match.opponent)?.roster : null;
+
+  async function ask(label, dataSummary) {
+    setLoadingChip(label);
+    setNote(null);
+    setNoteError(null);
+    try {
+      const basePrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
+      const prompt = `${basePrompt}\n\nQUICK CHECK-IN:\nThe keeper is mid-${kind === "match" ? "match" : "session"} right now and just tapped a quick prompt rather than typing — they want a glance, not a conversation. Here's the real, already-computed data for it:\n${JSON.stringify(dataSummary)}\n\nRespond with ONE short, specific note — a sentence, maybe two. No greeting, no follow-up question, just the read.`;
+      const trigger = { role: "user", content: "(Quick-tap trigger, not a typed message from the keeper.)" };
+      const text = await callKip(prompt, [trigger]);
+      setNote(text);
+    } catch (e) {
+      setNoteError("Couldn't get a read just now — check your connection.");
+    } finally {
+      setLoadingChip(null);
+    }
+  }
+
+  function halftimeRead() {
+    const zones = emptyZoneMap();
+    (match.shots || []).forEach((s) => { if (zones[s.zone]) { if (s.outcome === "Save") zones[s.zone].saves++; else zones[s.zone].goals++; } });
+    const total = (match.shots || []).length;
+    const saves = (match.shots || []).filter((s) => s.outcome === "Save").length;
+    ask("Halftime read", {
+      opponent: match.opponent,
+      shotsFaced: total,
+      saves,
+      savePct: total > 0 ? Math.round((saves / total) * 100) : null,
+      zones: Object.entries(zones).filter(([, z]) => z.saves + z.goals > 0).map(([zone, z]) => ({ zone: ZONE_LABELS[zone], saves: z.saves, goals: z.goals })),
+    });
+  }
+
+  function dangerousToday() {
+    const stats = shooterStats([match], match.opponent, roster).filter((s) => s.total > 0);
+    ask("Who's dangerous today", { opponent: match.opponent, shootersFacedSoFar: stats });
+  }
+
+  function sessionCheck() {
+    ask("How's this going", { doneCount, totalItems, remaining: Math.max(0, totalItems - doneCount) });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-[#F3F2ED] rounded-t-2xl w-full max-w-md p-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-1.5">
+            <Sparkles size={15} color="#0E8388" />
+            <span className="text-sm font-black" style={{ color: "#12213A" }}>Ask Kip</span>
+          </div>
+          <button onClick={onClose}><X size={18} /></button>
+        </div>
+
+        {loadingChip && (
+          <div className="rounded-lg px-3 py-2 mb-3 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>Reading…</div>
+        )}
+        {!loadingChip && note && (
+          <div className="rounded-lg px-3 py-2 mb-3 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#12213A" }}>{note}</div>
+        )}
+        {noteError && <div className="text-[11px] mb-2" style={{ color: "#C1483B" }}>{noteError}</div>}
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {kind === "match" ? (
+            <>
+              <button onClick={halftimeRead} disabled={!!loadingChip} className="px-3 py-1.5 rounded-full text-xs font-semibold border disabled:opacity-40" style={{ borderColor: "#DAD7CC" }}>Halftime read</button>
+              {roster && roster.length > 0 && (
+                <button onClick={dangerousToday} disabled={!!loadingChip} className="px-3 py-1.5 rounded-full text-xs font-semibold border disabled:opacity-40" style={{ borderColor: "#DAD7CC" }}>Who's dangerous today</button>
+              )}
+            </>
+          ) : (
+            <button onClick={sessionCheck} disabled={!!loadingChip} className="px-3 py-1.5 rounded-full text-xs font-semibold border disabled:opacity-40" style={{ borderColor: "#DAD7CC" }}>How's this going</button>
+          )}
+        </div>
+        <button onClick={onOpenKip} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Want to actually talk it through? Open full chat</button>
+      </div>
+    </div>
+  );
+}
+
+function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, onFinish, onExit, onDelete, profile, season, plans, matches, adHocSessions, onOpenKip }) {
   const [now, setNow] = useState(Date.now());
   const [picker, setPicker] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   const [finishing, setFinishing] = useState(false);
   const [confirmDeleting, setConfirmDeleting] = useState(false);
+  const [showKipPanel, setShowKipPanel] = useState(false);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -3679,11 +3854,14 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
   return (
     <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-3 mb-2">
           <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70">
             <ChevronDown size={14} /> Minimize
           </button>
-          <button onClick={() => setConfirmDeleting(true)} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+          <button onClick={() => setShowKipPanel(true)} className="flex items-center gap-1 text-xs font-semibold" style={{ color: "#0E8388" }}>
+            <Sparkles size={13} /> Ask Kip
+          </button>
+          <button onClick={() => setConfirmDeleting(true)} className="ml-auto flex items-center gap-1 text-xs font-semibold text-white/70">
             <Trash2 size={13} /> Delete
           </button>
         </div>
@@ -3771,6 +3949,22 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
       </div>
 
       {picker && <ExercisePickerModal exercises={exercises} onClose={() => setPicker(false)} onPick={addAdHocExercise} />}
+
+      {showKipPanel && (
+        <KipQuickPanel
+          kind="training"
+          doneCount={doneCount}
+          totalItems={items.length}
+          profile={profile}
+          season={season}
+          plans={plans}
+          matches={matches}
+          adHocSessions={adHocSessions}
+          exercises={exercises}
+          onClose={() => setShowKipPanel(false)}
+          onOpenKip={onOpenKip}
+        />
+      )}
 
       {confirmDeleting && (
         <Modal onClose={() => setConfirmDeleting(false)}>
@@ -3879,7 +4073,7 @@ function LogSessionModal({ onClose, onSave, focus, gymEntries = [] }) {
 /* Kip                                                                */
 /* ---------------------------------------------------------------- */
 
-function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onApplyPtPlan, onOpenProfile }) {
+function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, opponents, onSavePlan, onApplyPtPlan, onOpenProfile }) {
   const [editing, setEditing] = useState(!profile.onboarded);
 
   if (editing) {
@@ -3907,6 +4101,8 @@ function KipTab({ profile, onSaveProfile, messages, onSaveMessages, plans, seaso
       matches={matches}
       exercises={exercises}
       adHocSessions={adHocSessions}
+      opponents={opponents}
+      onSavePlan={onSavePlan}
       onOpenProfile={onOpenProfile}
     />
   );
@@ -4619,7 +4815,7 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, pl
   );
 }
 
-async function callKip(systemPrompt, apiMessages) {
+async function postKip(body) {
   const { data: { session } } = await supabase.auth.getSession();
   const response = await fetch("/.netlify/functions/kip-chat", {
     method: "POST",
@@ -4627,11 +4823,50 @@ async function callKip(systemPrompt, apiMessages) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${session?.access_token}`,
     },
-    body: JSON.stringify({ system: systemPrompt, messages: apiMessages }),
+    body: JSON.stringify(body),
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Kip request failed");
+  return data;
+}
+
+async function callKip(systemPrompt, apiMessages) {
+  const data = await postKip({ system: systemPrompt, messages: apiMessages });
   return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+}
+
+// Full parsed response (not just joined text) — needed so a tool-enabled
+// call can see stop_reason and any tool_use blocks, not just prose.
+async function callKipRaw({ system, messages, tools, maxTokens }) {
+  return postKip({ system, messages, tools, maxTokens });
+}
+
+// Drives the client-executed tool-call loop: send the conversation with
+// tools attached; if Claude asks to use one, run the real function against
+// ctx (real local app state), feed the result back as a tool_result, and
+// repeat until Claude gives a final text answer or the round cap is hit.
+// Capped rather than unbounded so a confused loop can't run away — three
+// rounds is more than any of the current tools should ever need.
+async function runKipWithTools({ system, messages, ctx, maxRounds = 3 }) {
+  let working = messages.map((m) => ({ role: m.role, content: m.content }));
+  let toolResults = [];
+  for (let round = 0; round < maxRounds; round++) {
+    const data = await callKipRaw({ system, messages: working, tools: KIP_TOOLS, maxTokens: 1200 });
+    const content = data.content || [];
+    const toolUses = content.filter((b) => b.type === "tool_use");
+    if (data.stop_reason !== "tool_use" || toolUses.length === 0) {
+      const text = content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      return { text, toolResults };
+    }
+    working = [...working, { role: "assistant", content }];
+    const resultBlocks = toolUses.map((tu) => {
+      const result = executeKipTool(tu.name, tu.input || {}, ctx);
+      toolResults.push({ name: tu.name, input: tu.input, result });
+      return { type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(result.summary !== undefined ? result.summary : result) };
+    });
+    working = [...working, { role: "user", content: resultBlocks }];
+  }
+  return { text: "Sorry, that took a few too many steps to work out — try asking a bit more specifically?", toolResults };
 }
 
 function fileToBase64(file) {
@@ -4692,7 +4927,308 @@ async function extractPtPlanFromFile(file) {
   }
 }
 
-function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, onOpenProfile }) {
+/* ---------------------------------------------------------------- */
+/* Kip tool-calling                                                   */
+/* Anthropic tool-use, executed entirely client-side against the same */
+/* real functions the rest of the app already calls — Builder's own   */
+/* generators and Stats' own aggregation functions. The proxy only    */
+/* forwards the tool schema and returns whatever Claude replies with; */
+/* it never runs any of this itself. See DECISIONS.md, "Kip across    */
+/* the app."                                                          */
+/* ---------------------------------------------------------------- */
+
+const KIP_TOOLS = [
+  {
+    name: "build_training_block",
+    description: "Generate a real 6-week training block using Keepr's own block generator. Call this whenever the keeper asks you to build, create, or put together a training block or program — never describe what a block would look like in prose, actually call this instead. The result is shown to the keeper to review and accept, so it's fine to call this even if you're not 100% sure of every parameter.",
+    input_schema: {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["goal", "freeform"], description: "\"goal\" auto-builds a progressive structure around a specific goal. \"freeform\" makes an empty 6-week skeleton with no exercises placed, for a keeper who wants to pick everything themselves." },
+        goal_id: { type: "string", enum: GOALS.map((g) => g.id), description: `Required when mode is "goal". One of: ${GOALS.map((g) => `${g.id} = ${g.name} (${g.blurb})`).join("; ")}.` },
+        season: { type: "string", enum: ["Winter", "Summer"], description: "Winter = indoor court handball, Summer = beach handball. Default to the keeper's current season context unless they ask for the other one." },
+        use_data: { type: "boolean", description: "Whether to bias exercise selection toward the keeper's real weak zones, niggles, and training log. Default true — only set false if the keeper explicitly wants a plain, unbiased block." },
+        sessions_per_week: { type: "integer", description: "Only used when mode is freeform. Default 3." },
+        name: { type: "string", description: "A short name for the block. Make one up that fits if the keeper didn't give one." },
+      },
+      required: ["mode", "season"],
+    },
+  },
+  {
+    name: "get_stats",
+    description: "Pull real, already-computed numbers from Keepr's own stats functions. Call this when the keeper actually asks something numeric, or right before you're about to state a specific save%, trend, weak zone, gym-lift number, or opponent breakdown yourself — never estimate or recompute these from context, which may be stale or incomplete. Don't call this speculatively on an ordinary check-in or greeting that doesn't call for a number.",
+    input_schema: {
+      type: "object",
+      properties: {
+        metric: {
+          type: "string",
+          enum: ["zone_breakdown", "shot_type_breakdown", "training_summary", "gym_progress", "opponent_breakdown"],
+          description: "zone_breakdown = save% per goal zone. shot_type_breakdown = save% per shot type (wing/9m/6m/penalty indoors, spin/regular/etc beach). training_summary = session completion rate, RPE trend, weekly streak. gym_progress = top-set/1RM trend and PRs for logged gym exercises. opponent_breakdown = per-shooter save% against a named opponent — requires opponent_name.",
+        },
+        season: { type: "string", enum: ["Winter", "Summer", "All"], description: "Defaults to the keeper's current season context." },
+        exercise_name: { type: "string", description: "Only for gym_progress — filter to one exercise by name. Omit for every logged gym exercise." },
+        opponent_name: { type: "string", description: "Required for opponent_breakdown — the opponent's name exactly as logged in their matches." },
+      },
+      required: ["metric"],
+    },
+  },
+];
+
+// The block itself is never sent back to the model as text — Claude only
+// gets a compact summary to narrate from, keeping tokens small and avoiding
+// any temptation to enumerate every exercise in prose. The full block
+// travels in the client-side result and only gets persisted (via savePlan)
+// once the keeper explicitly accepts it — same "review before commit"
+// discipline as every other generated-content flow in this app.
+function executeBuildTrainingBlock(input, ctx) {
+  const season = input.season || ctx.season;
+  let block;
+  if (input.mode === "freeform") {
+    block = generateFreeformBlock(input.name?.trim() || "New Training Block", season, input.sessions_per_week || 3);
+  } else {
+    const goal = GOALS.find((g) => g.id === input.goal_id);
+    if (!goal) return { summary: { error: `Unknown goal_id "${input.goal_id}". Valid options: ${GOALS.map((g) => g.id).join(", ")}.` } };
+    const useData = input.use_data !== false;
+    const dataContext = useData ? { useData: true, profile: ctx.profile, matches: ctx.matches, plans: ctx.plans, adHocSessions: ctx.adHocSessions } : null;
+    block = generateGoalBlock(input.name?.trim() || `${goal.name} Block`, season, input.goal_id, ctx.exercises, dataContext);
+  }
+  const totalSessions = block.weeks.reduce((a, w) => a + w.sessions.length, 0);
+  const totalExercises = block.weeks.reduce((a, w) => a + w.sessions.reduce((b, s) => b + s.exercises.length, 0), 0);
+  return {
+    block,
+    summary: { name: block.name, season: block.season, goal: block.goal, weeks: block.weeks.length, sessions: totalSessions, exercisesPlaced: totalExercises },
+  };
+}
+
+function executeGetStats(input, ctx) {
+  const season = input.season || ctx.season;
+  switch (input.metric) {
+    case "zone_breakdown": {
+      const agg = aggregateMatchStats(ctx.matches, season);
+      const totalShots = agg.totalSaves + agg.totalGoals;
+      const zones = Object.entries(agg.zones)
+        .filter(([, z]) => z.saves + z.goals > 0)
+        .map(([zone, z]) => ({ zone, label: ZONE_LABELS[zone], saves: z.saves, shots: z.saves + z.goals, savePct: Math.round((z.saves / (z.saves + z.goals)) * 100) }));
+      return { season, totalShots, overallSavePct: totalShots > 0 ? Math.round((agg.totalSaves / totalShots) * 100) : null, zones };
+    }
+    case "shot_type_breakdown": {
+      const filtered = ctx.matches.filter((m) => m.season === "Summer" && (season === "All" || season === "Summer"));
+      const agg = aggregateShotTypeStats(filtered);
+      const types = Object.entries(agg).map(([type, v]) => ({ type, saves: v.saves, shots: v.saves + v.goals, savePct: (v.saves + v.goals) > 0 ? Math.round((v.saves / (v.saves + v.goals)) * 100) : null }));
+      if (types.length === 0) return { note: "Shot-type breakdown is only tracked for beach handball (Summer) matches, and none are logged for that filter yet." };
+      return { types };
+    }
+    case "training_summary": {
+      const recentRpe = rpeTrend(ctx.plans).slice(-5);
+      const completed = completedSessionsWithMeta(ctx.plans);
+      const dueSessions = ctx.plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.length, 0), 0);
+      return {
+        streakWeeks: weeklyStreak(ctx.plans),
+        sessionsCompleted: completed.length,
+        totalSessionsInPlans: dueSessions,
+        recentRpe: recentRpe.map((r) => r.rpe),
+      };
+    }
+    case "gym_progress": {
+      const ids = [...loggedGymExerciseIds(ctx.plans, ctx.adHocSessions)];
+      const filtered = input.exercise_name
+        ? ids.filter((id) => ctx.exercises.find((e) => e.id === id)?.name.toLowerCase().includes(input.exercise_name.toLowerCase()))
+        : ids;
+      const lifts = filtered.map((id) => {
+        const ex = ctx.exercises.find((e) => e.id === id);
+        const history = exerciseLogHistory(ctx.plans, id, ctx.adHocSessions);
+        if (!ex || history.length === 0) return null;
+        const latest = history[history.length - 1];
+        const first = history[0];
+        return {
+          exercise: ex.name,
+          sessionsLogged: history.length,
+          latestTopWeight: latest.topWeight,
+          latestE1rm: latest.e1rm,
+          trend: history.length > 1 ? (latest.topWeight > first.topWeight ? "up" : latest.topWeight < first.topWeight ? "down" : "flat") : "single session",
+          prCount: history.filter((h) => h.isPr).length,
+          plateaued: isPlateaued(history),
+        };
+      }).filter(Boolean);
+      if (lifts.length === 0) return { note: input.exercise_name ? `No logged sets found matching "${input.exercise_name}".` : "No gym sets logged yet." };
+      return { lifts };
+    }
+    case "opponent_breakdown": {
+      if (!input.opponent_name) return { error: "opponent_name is required for opponent_breakdown." };
+      const roster = findOpponentRoster(ctx.opponents, input.opponent_name)?.roster || [];
+      const shooters = shooterStats(ctx.matches, input.opponent_name, roster);
+      const record = opponentRecord(ctx.matches, input.opponent_name);
+      if (!record) return { note: `No matches logged yet against "${input.opponent_name}".` };
+      return { opponent: input.opponent_name, record, shooters: shooters.length ? shooters : undefined, note: shooters.length === 0 ? "No shots have shooter numbers attributed yet for this opponent." : undefined };
+    }
+    default:
+      return { error: `Unknown metric "${input.metric}".` };
+  }
+}
+
+function executeKipTool(name, input, ctx) {
+  if (name === "build_training_block") return executeBuildTrainingBlock(input, ctx);
+  if (name === "get_stats") return executeGetStats(input, ctx);
+  return { error: `Unknown tool "${name}".` };
+}
+
+/* ---------------------------------------------------------------- */
+/* Kip reports                                                        */
+/* Deliberately NOT tool-calling — reuses the exact alerts pattern:    */
+/* the client computes real numbers first via the same aggregation     */
+/* functions everything else here uses, then makes one plain prompt    */
+/* asking Kip to narrate them. "Compute then narrate" is already a      */
+/* proven shape in this app; a report is that shape with more data in  */
+/* one pass, not a reason to route through tool-use.                   */
+/* ---------------------------------------------------------------- */
+
+function computeReportData({ matches, plans, adHocSessions, exercises, season }) {
+  const agg = aggregateMatchStats(matches, season);
+  const totalShots = agg.totalSaves + agg.totalGoals;
+  const zoneEntries = Object.entries(agg.zones)
+    .filter(([, z]) => z.saves + z.goals > 0)
+    .map(([zone, z]) => ({ zone, label: ZONE_LABELS[zone], savePct: Math.round((z.saves / (z.saves + z.goals)) * 100), shots: z.saves + z.goals }));
+  const weakestZones = [...zoneEntries].sort((a, b) => a.savePct - b.savePct).slice(0, 3);
+
+  const completed = completedSessionsWithMeta(plans);
+  const totalSessionsInPlans = plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.length, 0), 0);
+  const completionRate = totalSessionsInPlans > 0 ? Math.round((completed.length / totalSessionsInPlans) * 100) : null;
+
+  const gymIds = [...loggedGymExerciseIds(plans, adHocSessions)];
+  const gymProgress = gymIds.map((id) => {
+    const ex = exercises.find((e) => e.id === id);
+    const history = exerciseLogHistory(plans, id, adHocSessions);
+    if (!ex || history.length === 0) return null;
+    const latest = history[history.length - 1];
+    const first = history[0];
+    return {
+      exercise: ex.name,
+      sessionsLogged: history.length,
+      latestTopWeight: latest.topWeight,
+      trend: history.length > 1 ? (latest.topWeight > first.topWeight ? "up" : latest.topWeight < first.topWeight ? "down" : "flat") : "single session",
+      prCount: history.filter((h) => h.isPr).length,
+    };
+  }).filter(Boolean);
+
+  return {
+    season,
+    generatedAt: new Date().toISOString(),
+    overallSavePct: totalShots > 0 ? Math.round((agg.totalSaves / totalShots) * 100) : null,
+    totalShots,
+    weakestZones,
+    saveTrend: agg.trend.slice(-10),
+    completionRate,
+    sessionsCompleted: completed.length,
+    totalSessionsInPlans,
+    rpeTrend: rpeTrend(plans).map((r) => r.rpe),
+    streakWeeks: weeklyStreak(plans),
+    gymProgress,
+  };
+}
+
+async function generateKipReport({ profile, plans, season, matches, exercises, adHocSessions }) {
+  const data = computeReportData({ matches, plans, adHocSessions, exercises, season });
+  const basePrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
+  const reportPrompt = `${basePrompt}\n\nREPORT CONTEXT:\nYou're writing a short progress report for the keeper to read on their own, not replying to a question. Here's the real, already-computed data to cover — don't re-derive any of it, just narrate what's actually here:\n${JSON.stringify(data, null, 2)}\n\nWrite it as a few short natural paragraphs in your own voice — training consistency, match save% trend and weakest zones, and gym/rep progress if there's any logged data for it. Lead with whatever's most worth knowing. Stay grounded in the numbers given, don't invent anything beyond them. If there's genuinely very little data yet, say that plainly rather than padding it out. No headers, no bullet list of stats — write it the way you'd actually talk someone through their last stretch of training.`;
+  const triggerMessage = { role: "user", content: "(Report generation trigger — not a message from the keeper. Write the report described in REPORT CONTEXT.)" };
+  const narrative = await callKip(reportPrompt, [triggerMessage]);
+  return { id: uid(), createdAt: new Date().toISOString(), season, data, narrative };
+}
+
+// One consistent visual signal for "Kip actually did something" — a real
+// action taken (block built, report generated) or a proactive alert Kip
+// surfaced on its own — versus ordinary conversational advice, which gets
+// no badge at all. Previously only half-built: alert messages were tagged
+// isAlert but nothing ever rendered differently for them. This is the
+// single place that visual treatment lives now, reused everywhere a
+// message carries an `action`.
+const KIP_ACTION_META = {
+  alert: { icon: Bell, label: "Kip noticed something" },
+  block_built: { icon: Target, label: "Block built" },
+  report_generated: { icon: BarChart3, label: "Report generated" },
+};
+
+function KipActionBadge({ action }) {
+  const meta = KIP_ACTION_META[action?.type];
+  if (!meta) return null;
+  const Icon = meta.icon;
+  return (
+    <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>
+      <Icon size={11} /> {meta.label}
+    </div>
+  );
+}
+
+// Shared between the main Kip tab and the compact KipAssistantSheet used
+// from Builder — one message-rendering implementation, so both surfaces
+// stay visually identical rather than drifting into "two Kips" over time.
+function KipMessageThread({ messages, sending, error, onSaveMessages, onSavePlan, scrollRef, emptyText }) {
+  return (
+    <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 space-y-2.5">
+      {messages.length === 0 && (
+        <div className="text-xs text-gray-400 py-2">{emptyText}</div>
+      )}
+      {messages.map((m, i) => (
+        <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+          <div
+            className="max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-snug whitespace-pre-wrap"
+            style={
+              m.role === "user"
+                ? { background: "#12213A", color: "#fff", borderBottomRightRadius: 4 }
+                : { background: "#fff", color: "#12213A", border: "1px solid #DAD7CC", borderBottomLeftRadius: 4 }
+            }
+          >
+            <KipActionBadge action={m.action} />
+            {m.content}
+            {m.action?.type === "block_built" && m.action.block && (
+              <div className="mt-2 pt-2 border-t" style={{ borderColor: "#DAD7CC" }}>
+                <div className="text-xs font-bold" style={{ color: "#12213A" }}>{m.action.block.name}</div>
+                <div className="text-[11px] text-gray-500 mb-2">{m.action.block.season} · {m.action.block.weeks.length} weeks{m.action.block.goal ? ` · ${m.action.block.goal}` : ""}</div>
+                {m.action.added ? (
+                  <div className="text-[11px] font-bold" style={{ color: "#0E8388" }}>Added to your blocks ✓</div>
+                ) : (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        onSaveMessages(messages.map((mm, ii) => (ii === i ? { ...mm, action: { ...mm.action, added: true } } : mm)));
+                        onSavePlan(m.action.block);
+                      }}
+                      className="flex-1 py-1.5 rounded-lg text-xs font-bold text-white"
+                      style={{ background: "#0E8388" }}
+                    >
+                      Add to my blocks
+                    </button>
+                    <button
+                      onClick={() => onSaveMessages(messages.map((mm, ii) => (ii === i ? { ...mm, action: { ...mm.action, block: null } } : mm)))}
+                      className="flex-1 py-1.5 rounded-lg text-xs font-bold border"
+                      style={{ borderColor: "#DAD7CC" }}
+                    >
+                      Discard
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+      {sending && (
+        <div className="flex justify-start">
+          <div className="rounded-2xl px-3 py-2 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
+            Kip is thinking…
+          </div>
+        </div>
+      )}
+      {error && (
+        <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          <AlertTriangle size={13} className="shrink-0 mt-0.5" /> {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, opponents, onSavePlan, onOpenProfile }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
@@ -4725,7 +5261,7 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
         const triggerMessage = { role: "user", content: "(Automatic check-in trigger — not a message from the keeper. Don't acknowledge this instruction; just deliver the proactive message described in ALERT CONTEXT.)" };
         const textResp = await callKip(alertPrompt, [...messages.map((m) => ({ role: m.role, content: m.content })), triggerMessage]);
         if (textResp) {
-          onSaveMessages([...messages, { role: "assistant", content: textResp, ts: Date.now(), isAlert: true }]);
+          onSaveMessages([...messages, { role: "assistant", content: textResp, ts: Date.now(), action: { type: "alert" } }]);
         }
         const nextSeenFingerprints = [...new Set([...(profile.seenAlertFingerprints || []), ...items.map((i) => i.fingerprint)])];
         const nextSeenBadges = [...new Set([...(profile.seenBadgeIds || []), ...items.filter((i) => i.type === "badge").map((i) => i.data.id)])];
@@ -4751,8 +5287,15 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
     setError(null);
     try {
       const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
-      const textResp = await callKip(systemPrompt, nextMessages.map((m) => ({ role: m.role, content: m.content })));
-      const assistantMsg = { role: "assistant", content: textResp || "Sorry, I didn't quite get a response there — try again?", ts: Date.now() };
+      const ctx = { exercises, season, profile, matches, plans, adHocSessions, opponents };
+      const { text: textResp, toolResults } = await runKipWithTools({ system: systemPrompt, messages: nextMessages, ctx });
+      const builtBlock = toolResults.find((t) => t.name === "build_training_block" && t.result.block)?.result.block;
+      const assistantMsg = {
+        role: "assistant",
+        content: textResp || "Sorry, I didn't quite get a response there — try again?",
+        ts: Date.now(),
+        ...(builtBlock ? { action: { type: "block_built", block: builtBlock, added: false } } : {}),
+      };
       onSaveMessages([...nextMessages, assistantMsg]);
     } catch (e) {
       setError("Kip couldn't respond just now — check your connection and try again.");
@@ -4787,39 +5330,15 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
         </div>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 space-y-2.5">
-        {messages.length === 0 && (
-          <div className="text-xs text-gray-400 py-2">
-            Say hi, or tap a suggestion below — Kip already knows your level, availability and current program.
-          </div>
-        )}
-        {messages.map((m, i) => (
-          <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div
-              className="max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-snug whitespace-pre-wrap"
-              style={
-                m.role === "user"
-                  ? { background: "#12213A", color: "#fff", borderBottomRightRadius: 4 }
-                  : { background: "#fff", color: "#12213A", border: "1px solid #DAD7CC", borderBottomLeftRadius: 4 }
-              }
-            >
-              {m.content}
-            </div>
-          </div>
-        ))}
-        {sending && (
-          <div className="flex justify-start">
-            <div className="rounded-2xl px-3 py-2 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
-              Kip is thinking…
-            </div>
-          </div>
-        )}
-        {error && (
-          <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-            <AlertTriangle size={13} className="shrink-0 mt-0.5" /> {error}
-          </div>
-        )}
-      </div>
+      <KipMessageThread
+        messages={messages}
+        sending={sending}
+        error={error}
+        onSaveMessages={onSaveMessages}
+        onSavePlan={onSavePlan}
+        scrollRef={scrollRef}
+        emptyText="Say hi, or tap a suggestion below — Kip already knows your level, availability and current program."
+      />
 
       <div className="shrink-0 px-4 pt-2 pb-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
         <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-4 px-4">
@@ -4853,6 +5372,114 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
       {showBadges && (
         <BadgesModal points={points} earnedBadgeIds={earnedBadgeIds} onClose={() => setShowBadges(false)} />
       )}
+    </div>
+  );
+}
+
+// Compact, full-screen conversational entry point — same persona, same tool
+// access, same kipMessages thread as the main tab, just reached from inside
+// Builder instead of the bottom nav. Not a second Kip: closing this and
+// opening the Kip tab shows the exact same conversation, mid-stream.
+//
+// When onBlockBuilt is given (the Builder case), a successful
+// build_training_block call skips the inline Add/Discard card entirely and
+// hands the draft straight to Builder's own review screen — Builder's Save
+// button already IS that confirmation step, so a second one here would just
+// be a redundant gate in front of the same decision.
+function KipAssistantSheet({ profile, messages, onSaveMessages, plans, season, matches, exercises, adHocSessions, opponents, onSavePlan, onBlockBuilt, onClose }) {
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState(null);
+  const scrollRef = React.useRef(null);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages, sending]);
+
+  async function sendMessage(text) {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+    const userMsg = { role: "user", content: trimmed, ts: Date.now() };
+    const nextMessages = [...messages, userMsg];
+    onSaveMessages(nextMessages);
+    setInput("");
+    setSending(true);
+    setError(null);
+    try {
+      const systemPrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
+      const ctx = { exercises, season, profile, matches, plans, adHocSessions, opponents };
+      const { text: textResp, toolResults } = await runKipWithTools({ system: systemPrompt, messages: nextMessages, ctx });
+      const builtBlock = toolResults.find((t) => t.name === "build_training_block" && t.result.block)?.result.block;
+      if (builtBlock && onBlockBuilt) {
+        onSaveMessages([...nextMessages, { role: "assistant", content: textResp || "Here's a draft — take a look.", ts: Date.now(), action: { type: "block_built" } }]);
+        onBlockBuilt(builtBlock);
+        return;
+      }
+      const assistantMsg = {
+        role: "assistant",
+        content: textResp || "Sorry, I didn't quite get a response there — try again?",
+        ts: Date.now(),
+        ...(builtBlock ? { action: { type: "block_built", block: builtBlock, added: false } } : {}),
+      };
+      onSaveMessages([...nextMessages, assistantMsg]);
+    } catch (e) {
+      setError("Kip couldn't respond just now — check your connection and try again.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0 flex items-center justify-between" style={{ background: "#12213A" }}>
+        <div className="flex items-center gap-1.5">
+          <Sparkles size={15} color="#0E8388" />
+          <span className="text-sm font-black text-white">Kip</span>
+          <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(255,255,255,0.15)", color: "#fff" }}>Beta</span>
+        </div>
+        <button onClick={onClose} className="text-xs font-semibold text-white/70">Close</button>
+      </div>
+
+      <KipMessageThread
+        messages={messages}
+        sending={sending}
+        error={error}
+        onSaveMessages={onSaveMessages}
+        onSavePlan={onSavePlan}
+        scrollRef={scrollRef}
+        emptyText={onBlockBuilt ? "Tell Kip what you need — \"build me a beach block, my shoulder's a bit sore\" works." : "Say hi, or tap a suggestion below."}
+      />
+
+      <div className="shrink-0 px-4 pt-2 pb-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        {onBlockBuilt && (
+          <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-4 px-4">
+            {["Build me a goal-based block", "Build one using my real data", "Just an empty freeform block"].map((p) => (
+              <button key={p} onClick={() => sendMessage(p)} disabled={sending} className="shrink-0 px-2.5 py-1 rounded-full text-[11px] font-semibold border whitespace-nowrap disabled:opacity-40" style={{ borderColor: "#DAD7CC", color: "#12213A" }}>
+                {p}
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 bg-white border rounded-full px-3.5 py-2 text-sm outline-none"
+            style={{ borderColor: "#DAD7CC" }}
+            placeholder="Ask Kip anything…"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") sendMessage(input); }}
+            disabled={sending}
+          />
+          <button
+            onClick={() => sendMessage(input)}
+            disabled={sending || !input.trim()}
+            className="w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0 disabled:opacity-40"
+            style={{ background: "#0E8388" }}
+          >
+            <Send size={15} />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5424,11 +6051,12 @@ function MatchWrapUpModal({ match, durationMinutes, onClose, onSave }) {
   );
 }
 
-function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete }) {
+function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete, profile, season, plans, matches, adHocSessions, exercises, onOpenKip }) {
   const [now, setNow] = useState(Date.now());
   const [zoneTap, setZoneTap] = useState(null);
   const [wrappingUp, setWrappingUp] = useState(false);
   const [confirmDeleting, setConfirmDeleting] = useState(false);
+  const [showKipPanel, setShowKipPanel] = useState(false);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -5466,11 +6094,14 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   return (
     <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-3 mb-2">
           <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70">
             <ChevronDown size={14} /> Minimize
           </button>
-          <button onClick={() => setConfirmDeleting(true)} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+          <button onClick={() => setShowKipPanel(true)} className="flex items-center gap-1 text-xs font-semibold" style={{ color: "#0E8388" }}>
+            <Sparkles size={13} /> Ask Kip
+          </button>
+          <button onClick={() => setConfirmDeleting(true)} className="ml-auto flex items-center gap-1 text-xs font-semibold text-white/70">
             <Trash2 size={13} /> Delete
           </button>
         </div>
@@ -5529,6 +6160,22 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
 
       {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} roster={findOpponentRoster(opponents, match.opponent)?.roster} onClose={() => setZoneTap(null)} onSave={logShot} />}
 
+      {showKipPanel && (
+        <KipQuickPanel
+          kind="match"
+          match={match}
+          opponents={opponents}
+          profile={profile}
+          season={season}
+          plans={plans}
+          matches={matches}
+          adHocSessions={adHocSessions}
+          exercises={exercises}
+          onClose={() => setShowKipPanel(false)}
+          onOpenKip={onOpenKip}
+        />
+      )}
+
       {confirmDeleting && (
         <Modal onClose={() => setConfirmDeleting(false)}>
           <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Delete this match?</h3>
@@ -5552,11 +6199,34 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, reports = [], onAddReport, kipMessages, onSaveMessages }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [showLiveForm, setShowLiveForm] = useState(false);
   const [filter, setFilter] = useState(season);
+  const [generatingReport, setGeneratingReport] = useState(false);
+  const [reportError, setReportError] = useState(null);
+  const [openReportId, setOpenReportId] = useState(null);
+
+  async function handleGenerateReport() {
+    setGeneratingReport(true);
+    setReportError(null);
+    try {
+      const report = await generateKipReport({ profile, plans, season, matches, exercises, adHocSessions });
+      onAddReport(report);
+      onSaveMessages([...kipMessages, {
+        role: "assistant",
+        content: "Put together a report on your last stretch of training and matches — worth a look.",
+        ts: Date.now(),
+        action: { type: "report_generated", reportId: report.id },
+      }]);
+      setOpenReportId(report.id);
+    } catch (e) {
+      setReportError("Couldn't generate a report just now — try again.");
+    } finally {
+      setGeneratingReport(false);
+    }
+  }
 
   // Not auto-rendered on mount — only surfaced as a "Resume recording"
   // prompt, same convention as Plans' Today card, so Minimize actually
@@ -5603,6 +6273,30 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
             {s === "Winter" ? "Indoor" : s === "Summer" ? "Beach" : "All"}
           </Chip>
         ))}
+      </div>
+
+      <div className="bg-white rounded-lg border p-3 mb-4" style={{ borderColor: "#DAD7CC" }}>
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="text-sm font-bold flex items-center gap-1.5" style={{ color: "#12213A" }}>
+            <BarChart3 size={14} color="#0E8388" /> Reports
+          </div>
+          <button onClick={handleGenerateReport} disabled={generatingReport} className="text-[11px] font-bold disabled:opacity-40" style={{ color: "#0E8388" }}>
+            {generatingReport ? "Generating…" : "+ Generate report"}
+          </button>
+        </div>
+        {reportError && <div className="text-[11px] mb-1" style={{ color: "#C1483B" }}>{reportError}</div>}
+        {reports.length === 0 ? (
+          <div className="text-[11px] text-gray-400">A real written summary of your training consistency, match trends, and rep progress — pulled together from your logged data, not just a chat message that scrolls away.</div>
+        ) : (
+          <div className="space-y-1.5">
+            {[...reports].reverse().slice(0, 4).map((r) => (
+              <button key={r.id} onClick={() => setOpenReportId(r.id)} className="w-full text-left flex items-center justify-between rounded-md px-2.5 py-2 text-xs" style={{ background: "#F3F2ED" }}>
+                <span className="font-semibold" style={{ color: "#12213A" }}>{formatShortDate(r.createdAt.slice(0, 10))} report</span>
+                <ChevronRight size={14} color="#8A8779" />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {!hasData ? (
@@ -5730,7 +6424,73 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
       )}
 
       <WorkoutStats plans={plans} exercises={exercises} adHocSessions={adHocSessions} />
+
+      {openReportId && (() => {
+        const report = reports.find((r) => r.id === openReportId);
+        if (!report) return null;
+        return <ReportDetailModal report={report} onClose={() => setOpenReportId(null)} />;
+      })()}
     </div>
+  );
+}
+
+function ReportDetailModal({ report, onClose }) {
+  const d = report.data;
+  return (
+    <Modal onClose={onClose}>
+      <div className="flex items-center gap-1.5 mb-1">
+        <BarChart3 size={15} color="#0E8388" />
+        <h3 className="text-base font-black" style={{ color: "#12213A" }}>{formatShortDate(report.createdAt.slice(0, 10))} report</h3>
+      </div>
+      <p className="text-sm text-gray-700 leading-relaxed mb-4 whitespace-pre-wrap">{report.narrative}</p>
+
+      <div className="grid grid-cols-2 gap-2 mb-3">
+        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Save rate</div>
+          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.overallSavePct != null ? `${d.overallSavePct}%` : "No shots logged"}</div>
+        </div>
+        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Session completion</div>
+          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.completionRate != null ? `${d.completionRate}%` : "No plan yet"}</div>
+        </div>
+        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Streak</div>
+          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.streakWeeks} week{d.streakWeeks !== 1 ? "s" : ""}</div>
+        </div>
+        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Sessions completed</div>
+          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.sessionsCompleted}</div>
+        </div>
+      </div>
+
+      {d.weakestZones.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Weakest zones</div>
+          <div className="space-y-1">
+            {d.weakestZones.map((z) => (
+              <div key={z.zone} className="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+                <span>{z.label}</span>
+                <span className="font-bold" style={{ color: "#12213A" }}>{z.savePct}% ({z.shots} shots)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {d.gymProgress.length > 0 && (
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Gym progress</div>
+          <div className="space-y-1">
+            {d.gymProgress.map((g) => (
+              <div key={g.exercise} className="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+                <span>{g.exercise}{g.prCount > 0 ? ` (${g.prCount} PR${g.prCount !== 1 ? "s" : ""})` : ""}</span>
+                <span className="font-bold" style={{ color: g.trend === "up" ? "#0E8388" : g.trend === "down" ? "#C1483B" : "#8A8779" }}>{g.trend}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 
