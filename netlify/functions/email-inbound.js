@@ -39,19 +39,13 @@ export default async (req, context) => {
     console.warn(`email-inbound: request from IP ${sourceIp}, expected ${IMPROVMX_WEBHOOK_IP} — processing anyway, logged for visibility only`);
   }
 
-  let payload;
-  try {
-    payload = await req.json();
-  } catch {
-    return new Response(JSON.stringify({ received: false }), { status: 200 });
-  }
-
-  // TEMPORARY diagnostic — real ImprovMX deliveries confirmed via their own
-  // Logs tab, but no suggestion was ever appearing, meaning the assumed
-  // payload shape (from their docs, not a real payload) doesn't match what
-  // they actually send. Dumps the raw shape into the known dev account so
-  // it can be inspected, then this block gets removed once the real shape
-  // is confirmed. Never touches real user data — separate debug field.
+  // TEMPORARY diagnostic — the previous version of this capture ran only
+  // after a successful JSON parse, so if ImprovMX's real payload isn't
+  // actually JSON (unconfirmed — their docs said JSON, but their docs also
+  // described a REST endpoint that turned out not to exist), it would have
+  // silently returned before ever being captured. Reads the raw text first,
+  // unconditionally, before attempting to parse anything.
+  const rawText = await req.text();
   try {
     await appendPendingCalendarSuggestion("3906ebe8-7992-4d8e-a8c4-2cbeae2e835e", {
       id: uid(),
@@ -61,10 +55,17 @@ export default async (req, context) => {
       date: "2026-01-01",
       time: null,
       location: null,
-      emailSubject: JSON.stringify(payload).slice(0, 1900),
+      emailSubject: `CT:${req.headers.get("content-type")} | ${rawText.slice(0, 1800)}`,
     });
   } catch (e) {
     console.error("debug capture failed", e.message);
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(rawText);
+  } catch {
+    return new Response(JSON.stringify({ received: false }), { status: 200 });
   }
 
   const recipient = (payload.to?.[0]?.email || payload.headers?.["Delivered-To"] || "").toLowerCase().trim();
