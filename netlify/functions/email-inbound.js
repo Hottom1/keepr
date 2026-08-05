@@ -39,31 +39,9 @@ export default async (req, context) => {
     console.warn(`email-inbound: request from IP ${sourceIp}, expected ${IMPROVMX_WEBHOOK_IP} — processing anyway, logged for visibility only`);
   }
 
-  // TEMPORARY diagnostic — the previous version of this capture ran only
-  // after a successful JSON parse, so if ImprovMX's real payload isn't
-  // actually JSON (unconfirmed — their docs said JSON, but their docs also
-  // described a REST endpoint that turned out not to exist), it would have
-  // silently returned before ever being captured. Reads the raw text first,
-  // unconditionally, before attempting to parse anything.
-  const rawText = await req.text();
-  try {
-    await appendPendingCalendarSuggestion("3906ebe8-7992-4d8e-a8c4-2cbeae2e835e", {
-      id: uid(),
-      createdAt: new Date().toISOString(),
-      source: "DEBUG_RAW_PAYLOAD",
-      title: "DEBUG",
-      date: "2026-01-01",
-      time: null,
-      location: null,
-      emailSubject: `CT:${req.headers.get("content-type")} | ${rawText.slice(0, 1800)}`,
-    });
-  } catch (e) {
-    console.error("debug capture failed", e.message);
-  }
-
   let payload;
   try {
-    payload = JSON.parse(rawText);
+    payload = await req.json();
   } catch {
     return new Response(JSON.stringify({ received: false }), { status: 200 });
   }
