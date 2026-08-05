@@ -43,6 +43,18 @@ export async function saveUserRowById(userId, nextData) {
   if (error) throw error;
 }
 
+// Appends via a single atomic SQL statement (supabase/migrations/0003) —
+// never a fetch-then-write of the whole blob. Two overlapping webhook
+// invocations for the same user (plausible whenever a keeper forwards more
+// than one email close together) raced on exactly that pattern in real
+// testing and silently reverted unrelated profile fields the losing write
+// never even knew about. See DECISIONS.md, "Email infrastructure
+// (ImprovMX)" for the full incident.
+export async function appendPendingCalendarSuggestion(userId, suggestion) {
+  const { error } = await getSupabaseAdmin().rpc("append_pending_calendar_suggestion", { p_user_id: userId, p_suggestion: suggestion });
+  if (error) throw error;
+}
+
 // inboundAlias lives at profile.inboundAlias (Profile owns it, alongside
 // the rest of a keeper's account-level settings) — not a top-level field of
 // the data blob, so the JSON path has to traverse through "profile" first.

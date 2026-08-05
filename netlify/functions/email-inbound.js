@@ -5,7 +5,7 @@
 // DECISIONS.md, "Email infrastructure (ImprovMX)" — ImprovMX doesn't sign
 // webhook requests, so a spoofed POST should be able to do no more damage
 // than pre-filling a review screen with junk.
-import { findUserRowByInboundAlias, saveUserRowById } from "../lib/supabaseAdmin.js";
+import { findUserRowByInboundAlias, appendPendingCalendarSuggestion } from "../lib/supabaseAdmin.js";
 import { parseFirstIcsEvent } from "../lib/icsParser.js";
 import { extractCalendarInfoFromEmail } from "../lib/calendarExtraction.js";
 
@@ -108,12 +108,8 @@ export default async (req, context) => {
   }
 
   if (suggestion) {
-    const nextData = {
-      ...userRow.data,
-      pendingCalendarSuggestions: [...(userRow.data.pendingCalendarSuggestions || []), suggestion],
-    };
     try {
-      await saveUserRowById(userRow.user_id, nextData);
+      await appendPendingCalendarSuggestion(userRow.user_id, suggestion);
     } catch (e) {
       console.error("email-inbound: save failed", e.message);
     }
