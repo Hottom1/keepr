@@ -28,6 +28,7 @@ import {
   TREND_MIN_MATCHES, TREND_MIN_SHOTS_PER_HALF, TREND_SWING_POINTS, splitMatchHalves, zoneTallies, zoneTrendSignals,
   shotTypeTallies, shotTypeTrendSignals, missedSessionsSignals, rpeHighSignal, streakAtRiskSignal, NIGGLE_QUIET_DAYS,
   niggleQuietSignals, newPrSignals, completedBlockSignals, computeKipAlerts, describeAlertItem,
+  EMAIL_ALERT_CATEGORIES, categoryForAlertType,
 } from "./lib/kipDomain.js";
 
 /* ---------------------------------------------------------------- */
@@ -3345,6 +3346,7 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
           <Paperclip size={12} /> Uploads
         </button>
       </div>
+      <NotificationsSection profile={profile} onSaveProfile={onSaveProfile} />
       <KipOnboarding
         profile={profile}
         onSave={onSaveProfile}
@@ -3354,6 +3356,84 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
         plans={plans}
         onApplyPtPlan={onApplyPtPlan}
       />
+    </div>
+  );
+}
+
+// Domain is public config (already live in DNS/Rules Routing), not a
+// secret — safe as a VITE_-exposed client env var alongside the anon key.
+const IMPROVMX_DOMAIN = import.meta.env.VITE_IMPROVMX_DOMAIN || "schedule.keepr.coach";
+
+function NotificationsSection({ profile, onSaveProfile }) {
+  const [copied, setCopied] = useState(false);
+  const alertsEnabled = profile.alertsEnabled !== false;
+  const categories = profile.emailAlertCategories || {};
+
+  // Assigned once, lazily, the first time a keeper lands on Profile — not at
+  // signup — so there's no unused-account cleanup concern and no separate
+  // "generate my address" button to skip past. Local part is fully random
+  // (not derived from name/email) so the address itself reveals nothing and
+  // can't be guessed from a keeper's public info.
+  useEffect(() => {
+    if (profile.inboundAlias) return;
+    const alias = `${uid()}-${uid().slice(0, 6)}@${IMPROVMX_DOMAIN}`;
+    onSaveProfile({ ...profile, inboundAlias: alias });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile.inboundAlias]);
+
+  function toggleCategory(id) {
+    onSaveProfile({ ...profile, emailAlertCategories: { ...categories, [id]: categories[id] === false ? true : false } });
+  }
+
+  function copyAlias() {
+    if (!profile.inboundAlias) return;
+    navigator.clipboard?.writeText(profile.inboundAlias);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <div className="px-4 pt-4">
+      <div className="bg-white rounded-lg border p-3.5 mb-2" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Forward your schedule</div>
+        <p className="text-xs text-gray-500 mb-2">Forward a match invite or training-calendar email to this address — Kip reads it and shows you what it found before anything's added.</p>
+        <button onClick={copyAlias} className="w-full text-left rounded-md px-2.5 py-2 text-xs font-mono break-all" style={{ background: "#F3F2ED", color: "#12213A" }}>
+          {profile.inboundAlias || "Generating your address…"}
+        </button>
+        {copied && <div className="text-[10px] font-semibold mt-1" style={{ color: "#0E8388" }}>Copied</div>}
+      </div>
+
+      <div className="bg-white rounded-lg border p-3.5 mb-4" style={{ borderColor: "#DAD7CC" }}>
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-sm font-bold" style={{ color: "#12213A" }}>Email alerts</div>
+          <button
+            onClick={() => onSaveProfile({ ...profile, alertsEnabled: !alertsEnabled })}
+            className="flex items-center gap-1 text-[11px] font-semibold"
+            style={{ color: alertsEnabled ? "#0E8388" : "#8A8779" }}
+          >
+            {alertsEnabled ? <Bell size={12} /> : <BellOff size={12} />}
+            {alertsEnabled ? "On" : "Off"}
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-2">Same switch as Kip's in-app check-ins — off here means no proactive email either. When it's on, pick which kinds of things are worth an email.</p>
+        <div className="space-y-1.5">
+          {EMAIL_ALERT_CATEGORIES.map((cat) => {
+            const on = alertsEnabled && categories[cat.id] !== false;
+            return (
+              <button
+                key={cat.id}
+                disabled={!alertsEnabled}
+                onClick={() => toggleCategory(cat.id)}
+                className="w-full flex items-center justify-between rounded-md px-2.5 py-2 text-xs disabled:opacity-40"
+                style={{ background: "#F3F2ED" }}
+              >
+                <span style={{ color: "#12213A" }}>{cat.label}</span>
+                {on ? <CheckCircle2 size={15} color="#0E8388" /> : <Circle size={15} color="#DAD7CC" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

@@ -1286,4 +1286,42 @@ export function describeAlertItem(item) {
   }
 }
 
+// Groups computeKipAlerts' item types into the categories a keeper actually
+// thinks in terms of, for per-category email preferences (part 4 of the
+// ImprovMX brief). Shared here rather than duplicated between the Profile
+// preferences UI (client) and the scheduled alerts function (server) — see
+// DECISIONS.md, "Email infrastructure (ImprovMX)".
+export const EMAIL_ALERT_CATEGORIES = [
+  { id: "training_consistency", label: "Missed sessions & streaks" },
+  { id: "rpe_trend", label: "Training load (RPE) trend" },
+  { id: "plateaus", label: "Gym plateaus" },
+  { id: "weakening_zones", label: "Weakening save zones" },
+  { id: "quiet_niggles", label: "Quiet niggles" },
+  { id: "milestones", label: "PRs & milestones" },
+];
+
+export function categoryForAlertType(type) {
+  switch (type) {
+    case "missed_sessions":
+    case "streak_risk":
+      return "training_consistency";
+    case "rpe_high":
+      return "rpe_trend";
+    case "plateau":
+      return "plateaus";
+    case "zone_worse":
+    case "shottype_worse":
+      return "weakening_zones";
+    case "niggle_quiet":
+      return "quiet_niggles";
+    case "new_pr":
+    case "block_complete":
+    case "badge":
+    case "zone_better":
+    case "shottype_better":
+    default:
+      return "milestones";
+  }
+}
+
 
