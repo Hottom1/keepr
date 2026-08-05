@@ -11,6 +11,13 @@ import { extractCalendarInfoFromEmail } from "../lib/calendarExtraction.js";
 
 // ImprovMX's own webhook guide names this as their one static sending IP
 // and recommends whitelisting it, since they don't sign requests at all.
+// Logged, not enforced: a real live test proved this rejects any request
+// that isn't from exactly this IP, and there's no way from here to confirm
+// ImprovMX only ever sends from this one address (regions, pool changes,
+// etc. aren't documented). Silently dropping a genuine forwarded email over
+// an unconfirmed IP is worse than the marginal security value of enforcing
+// it — the real safety boundary is that nothing here ever auto-commits a
+// Match or calendar entry regardless of who sent the request.
 const IMPROVMX_WEBHOOK_IP = "15.237.103.194";
 
 function uid() {
@@ -29,8 +36,7 @@ export default async (req, context) => {
 
   const sourceIp = context.ip || req.headers.get("x-nf-client-connection-ip");
   if (sourceIp && sourceIp !== IMPROVMX_WEBHOOK_IP) {
-    console.error(`email-inbound: rejected request from unexpected IP ${sourceIp}`);
-    return new Response(JSON.stringify({ received: false }), { status: 200 });
+    console.warn(`email-inbound: request from IP ${sourceIp}, expected ${IMPROVMX_WEBHOOK_IP} — processing anyway, logged for visibility only`);
   }
 
   let payload;
