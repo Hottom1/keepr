@@ -637,7 +637,12 @@ export default function GKTrainerApp() {
           Couldn't save — your changes may not persist.
         </div>
       )}
-      <div className="flex-1 overflow-y-auto pb-20 max-w-md w-full mx-auto">
+      {/* Kip manages its own fixed-height header/thread/input layout and needs
+          to end flush just above BottomNav, not with the generous pb-20 every
+          other (plain-scrolling) tab uses for breathing room past its last
+          item — that extra ~30px was showing up as a visible empty gap below
+          Kip's input bar. */}
+      <div className={`flex-1 overflow-y-auto max-w-md w-full mx-auto ${tab === "kip" ? "pb-[52px]" : "pb-20"}`}>
         {tab === "library" && (
           <Library
             exercises={allExercises}
@@ -5245,8 +5250,17 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
     }
   }
 
+  // Fixed pixel height, not a percentage/flex-fill of the parent — the
+  // app's root container is min-h-screen (a floor, not a ceiling), so
+  // nothing up the ancestor chain actually caps height at the viewport;
+  // a percentage or flex-1 height here just lets the whole page grow to
+  // fit the message thread instead of scrolling internally. 159px is
+  // TopBar's real rendered height (107px) plus the Kip tab's own reduced
+  // bottom clearance above BottomNav (see the pb-[52px] override in
+  // GKTrainerApp's tab-content wrapper) — recalibrate both together if
+  // either one changes, or the input bar will drift from BottomNav again.
   return (
-    <div className="flex flex-col" style={{ height: "calc(100vh - 190px)" }}>
+    <div className="flex flex-col" style={{ height: "calc(100vh - 159px)" }}>
       <div className="px-4 pt-3 pb-2 shrink-0">
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-1.5">
