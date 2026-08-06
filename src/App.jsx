@@ -6,7 +6,7 @@ import {
   Lightbulb, Eye, ShieldCheck, Zap, Brain, Compass, MessageCircle,
   Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw, Video,
   ClipboardList, Paperclip, Upload, Trophy, Bell, BellOff, Lock,
-  UserPlus, Link2, Mail,
+  UserPlus, Link2, Mail, HelpCircle,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { loadUserData, saveUserData, uploadNiggleFile, uploadGeneralFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
@@ -16,6 +16,7 @@ import {
   createOrResumeTeammateMatch, patchTeammateMatch, deleteTeammateMatch,
 } from "./lib/connections.js";
 import { supabase } from "./lib/supabaseClient.js";
+import { HELP_CATEGORIES, searchHelpArticles, articlesByCategory, findHelpArticle } from "./lib/helpContent.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
 import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
 import {
@@ -327,6 +328,14 @@ export default function GKTrainerApp() {
   // this is just "is the overlay open right now," not "is something in
   // progress" (that's still read straight off the data wherever it's shown).
   const [activeLiveTarget, setActiveLiveTarget] = useState(null);
+  // Help Centre panel state — null closed, {} open at the searchable home
+  // view, { articleId } open straight to one article (contextual ? buttons).
+  // Lifted here, not owned by any one tab, since the global launcher has to
+  // work from anywhere.
+  const [helpTarget, setHelpTarget] = useState(null);
+  function openHelp(articleId = null) {
+    setHelpTarget(articleId ? { articleId } : {});
+  }
 
   useEffect(() => {
     (async () => {
@@ -618,6 +627,7 @@ export default function GKTrainerApp() {
             pendingCalendarSuggestions={pendingCalendarSuggestions}
             onConfirmCalendarSuggestion={confirmCalendarSuggestion}
             onDiscardCalendarSuggestion={discardCalendarSuggestion}
+            onOpenHelp={openHelp}
           />
         )}
         {tab === "record" && (
@@ -633,6 +643,7 @@ export default function GKTrainerApp() {
             onSaveMatch={saveMatch}
             onSaveOpponentRoster={saveOpponentRoster}
             onOpenLiveRecorder={setActiveLiveTarget}
+            onOpenHelp={() => openHelp("record-live")}
           />
         )}
         {tab === "profile" && (
@@ -664,6 +675,7 @@ export default function GKTrainerApp() {
             profile={profile}
             reports={reports}
             onReportGenerated={addReportAndNotify}
+            onOpenHelp={() => openHelp("stats-log-match")}
           />
         )}
         {tab === "kip" && (
@@ -810,6 +822,15 @@ export default function GKTrainerApp() {
       })()}
 
       <BottomNav tab={tab} setTab={setTab} hasKipAlert={hasKipAlert} />
+
+      {!helpTarget && <HelpWidget onOpen={() => openHelp()} />}
+      {helpTarget && (
+        <HelpPanel
+          initialArticleId={helpTarget.articleId}
+          onClose={() => setHelpTarget(null)}
+          onOpenKip={onOpenKip}
+        />
+      )}
     </div>
   );
 }
@@ -900,6 +921,207 @@ function BottomNav({ tab, setTab, hasKipAlert }) {
             </button>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+/* Help Centre                                                        */
+/* Intercom-style: a floating launcher available everywhere, opening a  */
+/* searchable panel in place — no route change, content comes from     */
+/* src/lib/helpContent.js (plain data, kept separate so it's easy to    */
+/* keep in sync with the app without touching any UI code). Search is   */
+/* static keyword matching on purpose (see that file) — Kip is the      */
+/* fallback for anything it can't answer, reached the exact same way    */
+/* every other "open Kip" entry point in this app already does          */
+/* (minimize whatever's on screen, land on the Kip tab), not a second   */
+/* assistant persona bolted onto the help panel.                        */
+/* ---------------------------------------------------------------- */
+
+// Tiny plain-text convention matching helpContent.js: a blank line is a
+// paragraph break, a run of lines starting with "- " is a bullet list.
+// Deliberately not markdown — this is short FAQ copy, not rich content.
+function renderHelpBody(text) {
+  return text.trim().split("\n\n").map((block, i) => {
+    const lines = block.split("\n").filter(Boolean);
+    if (lines.length > 0 && lines.every((l) => l.startsWith("- "))) {
+      return (
+        <ul key={i} className="list-disc list-inside space-y-1.5 mb-3 text-sm text-gray-700 leading-relaxed">
+          {lines.map((l, j) => <li key={j}>{l.slice(2)}</li>)}
+        </ul>
+      );
+    }
+    return <p key={i} className="text-sm text-gray-700 leading-relaxed mb-3">{block}</p>;
+  });
+}
+
+// Positioned the same way BottomNav is — a full-width fixed wrapper with
+// an inner max-w-md mx-auto column — so the bubble sits inside the app's
+// own visible column on both mobile and the centered-desktop layout,
+// rather than drifting into the empty margin a plain `fixed right-4`
+// would land in outside max-w-md.
+function HelpWidget({ onOpen }) {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-30 pointer-events-none">
+      <div className="max-w-md mx-auto relative">
+        <button
+          onClick={onOpen}
+          aria-label="Help"
+          className="pointer-events-auto absolute bottom-20 right-4 w-11 h-11 rounded-full flex items-center justify-center"
+          style={{ background: "#12213A", boxShadow: "0 4px 14px rgba(18,33,58,0.35)" }}
+        >
+          <HelpCircle size={20} color="#fff" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Small "?" affordance for screens with real complexity (Builder, Stats,
+// Record) — jumps straight to the one article most likely to answer
+// what's on screen, instead of making someone go through the generic
+// launcher and search for it themselves.
+function HelpButton({ onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label="Help with this screen"
+      className="w-6 h-6 rounded-full flex items-center justify-center border shrink-0"
+      style={{ borderColor: "#DAD7CC", color: "#8A8779" }}
+    >
+      <span className="text-[11px] font-bold">?</span>
+    </button>
+  );
+}
+
+// initialArticleId set => opens straight to that article (contextual ?
+// buttons); left null => opens at the searchable home view (global
+// launcher). Three internal views (home / category / article) rather than
+// separate route-like components, since the whole point is staying
+// lightweight — this never leaves a single mounted component.
+function HelpPanel({ initialArticleId, onClose, onOpenKip }) {
+  const [query, setQuery] = useState("");
+  const [categoryId, setCategoryId] = useState(null);
+  const [articleId, setArticleId] = useState(initialArticleId || null);
+
+  const activeArticle = articleId ? findHelpArticle(articleId) : null;
+  const results = query.trim() ? searchHelpArticles(query) : [];
+
+  const showingArticle = !!articleId;
+  const showingCategory = !articleId && !!categoryId;
+  const showingHome = !articleId && !categoryId;
+
+  function back() {
+    if (articleId) { setArticleId(null); return; }
+    if (categoryId) { setCategoryId(null); return; }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="bg-[#F3F2ED] rounded-t-2xl sm:rounded-2xl w-full max-w-md flex flex-col overflow-hidden"
+        style={{ height: "85vh" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="shrink-0 px-4 pt-4 pb-3 border-b bg-white" style={{ borderColor: "#DAD7CC" }}>
+          <div className="flex items-center gap-2 mb-3">
+            {(showingArticle || showingCategory) ? (
+              <button onClick={back} className="flex items-center gap-1 text-xs font-semibold text-gray-500 -ml-1">
+                <ArrowLeft size={16} /> Back
+              </button>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <HelpCircle size={16} color="#0E8388" />
+                <span className="text-sm font-black" style={{ color: "#12213A" }}>Help</span>
+              </div>
+            )}
+            <div className="flex-1" />
+            <button onClick={onClose} className="p-1.5 rounded-full" style={{ background: "#F3F2ED" }} aria-label="Close help">
+              <X size={16} />
+            </button>
+          </div>
+          {showingHome && (
+            <div className="flex items-center gap-2 rounded-lg px-3 py-2 border" style={{ background: "#F3F2ED", borderColor: "#DAD7CC" }}>
+              <Search size={15} color="#8A8779" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search help"
+                className="flex-1 text-sm outline-none bg-transparent"
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {showingArticle && activeArticle && (
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>
+                {HELP_CATEGORIES.find((c) => c.id === activeArticle.category)?.label}
+              </div>
+              <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>{activeArticle.title}</h3>
+              {renderHelpBody(activeArticle.body)}
+            </div>
+          )}
+
+          {showingCategory && (
+            <div>
+              <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>
+                {HELP_CATEGORIES.find((c) => c.id === categoryId)?.label}
+              </h3>
+              <div className="space-y-2">
+                {articlesByCategory(categoryId).map((a) => (
+                  <button key={a.id} onClick={() => setArticleId(a.id)} className="w-full text-left bg-white rounded-lg border p-3 flex items-center justify-between" style={{ borderColor: "#DAD7CC" }}>
+                    <span className="text-sm font-semibold" style={{ color: "#12213A" }}>{a.title}</span>
+                    <ChevronRight size={15} color="#DAD7CC" />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {showingHome && (
+            query.trim() ? (
+              results.length > 0 ? (
+                <div>
+                  <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-2">
+                    {results.length} result{results.length !== 1 ? "s" : ""}
+                  </div>
+                  <div className="space-y-2">
+                    {results.map((a) => (
+                      <button key={a.id} onClick={() => setArticleId(a.id)} className="w-full text-left bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+                        <div className="text-sm font-semibold" style={{ color: "#12213A" }}>{a.title}</div>
+                        <div className="text-[11px] text-gray-400 mt-0.5">{HELP_CATEGORIES.find((c) => c.id === a.category)?.label}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <div className="text-sm text-gray-500 mb-3">Nothing in Help covers that.</div>
+                  <button
+                    onClick={() => { onClose(); onOpenKip(); }}
+                    className="text-sm font-bold flex items-center justify-center gap-1.5 mx-auto px-4 py-2 rounded-lg text-white"
+                    style={{ background: "#0E8388" }}
+                  >
+                    <Sparkles size={14} /> Ask Kip
+                  </button>
+                </div>
+              )
+            ) : (
+              <div className="space-y-2">
+                {HELP_CATEGORIES.map((c) => (
+                  <button key={c.id} onClick={() => setCategoryId(c.id)} className="w-full text-left bg-white rounded-lg border p-3 flex items-center justify-between" style={{ borderColor: "#DAD7CC" }}>
+                    <span className="text-sm font-bold" style={{ color: "#12213A" }}>{c.label}</span>
+                    <ChevronRight size={15} color="#DAD7CC" />
+                  </button>
+                ))}
+              </div>
+            )
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1203,7 +1425,7 @@ function Modal({ onClose, children }) {
 /* Builder                                                            */
 /* ---------------------------------------------------------------- */
 
-function Builder({ exercises, season, profile, matches, plans, adHocSessions, opponents = [], kipMessages = [], onSaveMessages, onSave, onBack }) {
+function Builder({ exercises, season, profile, matches, plans, adHocSessions, opponents = [], kipMessages = [], onSaveMessages, onSave, onBack, onOpenHelp }) {
   const [step, setStep] = useState("setup");
   const [name, setName] = useState("");
   const [blockSeason, setBlockSeason] = useState(season);
@@ -1255,7 +1477,10 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, op
           <ArrowLeft size={14} /> Back to Plans
         </button>
       )}
-      <h2 className="text-lg font-black mb-3" style={{ color: "#12213A" }}>Build a 6-week block</h2>
+      <div className="flex items-center gap-2 mb-3">
+        <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Build a 6-week block</h2>
+        {onOpenHelp && <HelpButton onClick={() => onOpenHelp("build-methods")} />}
+      </div>
 
       <Field label="Block name">
         <input className="input" placeholder="e.g. Pre-season Reflex Block" value={name} onChange={(e) => setName(e.target.value)} />
@@ -1676,7 +1901,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -1717,6 +1942,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
         onSaveMessages={onSaveMessages}
         onSave={(plan) => { onSave(plan); setShowBuilder(false); }}
         onBack={() => setShowBuilder(false)}
+        onOpenHelp={onOpenHelp}
       />
     );
   }
@@ -2163,7 +2389,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
 // Today card and Stats' header. Both paths call the same onOpenLiveRecorder
 // prop lifted to GKTrainerApp, so whichever one is used, the other
 // immediately sees it as "in progress" too — one shared source of truth.
-function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, onSaveAdHoc, onSaveMatch, onSaveOpponentRoster, onOpenLiveRecorder }) {
+function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, onSaveAdHoc, onSaveMatch, onSaveOpponentRoster, onOpenLiveRecorder, onOpenHelp }) {
   const [showLiveMatchForm, setShowLiveMatchForm] = useState(false);
   const [teammateOptions, setTeammateOptions] = useState([]);
   const active = findActiveRecording({ plans, adHocSessions, matches });
@@ -2215,7 +2441,10 @@ function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, o
 
   return (
     <div className="px-4 pt-4 pb-8">
-      <h2 className="text-lg font-black mb-3" style={{ color: "#12213A" }}>Record</h2>
+      <div className="flex items-center gap-2 mb-3">
+        <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Record</h2>
+        {onOpenHelp && <HelpButton onClick={onOpenHelp} />}
+      </div>
 
       {active ? (
         <button
@@ -5782,7 +6011,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, reports = [], onReportGenerated }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, reports = [], onReportGenerated, onOpenHelp }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [showLiveForm, setShowLiveForm] = useState(false);
@@ -5829,7 +6058,10 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
   return (
     <div className="px-4 pt-4 pb-8">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Match stats</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Match stats</h2>
+          {onOpenHelp && <HelpButton onClick={onOpenHelp} />}
+        </div>
         <div className="flex items-center gap-2">
           <button
             onClick={() => (inProgressMatch ? onOpenLiveRecorder({ kind: "match", matchId: inProgressMatch.id }) : setShowLiveForm(true))}
