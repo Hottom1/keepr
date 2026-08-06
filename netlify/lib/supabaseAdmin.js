@@ -97,3 +97,15 @@ export async function setAlertsEnabled(userId, enabled) {
   const { error } = await getSupabaseAdmin().rpc("set_alerts_enabled", { p_user_id: userId, p_enabled: enabled });
   if (error) throw error;
 }
+
+// Same atomic-append discipline as appendPendingCalendarSuggestion/
+// appendEmailAlertLog — see supabase/migrations/0006_coach_digest_atomics.sql.
+export async function appendReport(userId, report) {
+  const { error } = await getSupabaseAdmin().rpc("append_report", { p_user_id: userId, p_report: report });
+  if (error) throw error;
+}
+
+export async function setLastCoachDigestSentAt(userId, sentAtIso) {
+  const { error } = await getSupabaseAdmin().rpc("set_last_coach_digest_sent", { p_user_id: userId, p_sent_at: sentAtIso });
+  if (error) throw error;
+}

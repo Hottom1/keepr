@@ -1324,7 +1324,109 @@ export function categoryForAlertType(type) {
   }
 }
 
+// Moved here verbatim from App.jsx (Teammate/coach-sharing brief) — pure,
+// no callKip dependency, so the new server-side coach-digest scheduled
+// function can compute the exact same numbers the in-app "Generate report"
+// button does, without a second implementation to keep in sync.
+export function computeReportData({ matches, plans, adHocSessions, exercises, season }) {
+  const agg = aggregateMatchStats(matches, season);
+  const totalShots = agg.totalSaves + agg.totalGoals;
+  const zoneEntries = Object.entries(agg.zones)
+    .filter(([, z]) => z.saves + z.goals > 0)
+    .map(([zone, z]) => ({ zone, label: ZONE_LABELS[zone], savePct: Math.round((z.saves / (z.saves + z.goals)) * 100), shots: z.saves + z.goals }));
+  const weakestZones = [...zoneEntries].sort((a, b) => a.savePct - b.savePct).slice(0, 3);
 
+  const completed = completedSessionsWithMeta(plans);
+  const totalSessionsInPlans = plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.length, 0), 0);
+  const completionRate = totalSessionsInPlans > 0 ? Math.round((completed.length / totalSessionsInPlans) * 100) : null;
+
+  const gymIds = [...loggedGymExerciseIds(plans, adHocSessions)];
+  const gymProgress = gymIds.map((id) => {
+    const ex = exercises.find((e) => e.id === id);
+    const history = exerciseLogHistory(plans, id, adHocSessions);
+    if (!ex || history.length === 0) return null;
+    const latest = history[history.length - 1];
+    const first = history[0];
+    return {
+      exercise: ex.name,
+      sessionsLogged: history.length,
+      latestTopWeight: latest.topWeight,
+      trend: history.length > 1 ? (latest.topWeight > first.topWeight ? "up" : latest.topWeight < first.topWeight ? "down" : "flat") : "single session",
+      prCount: history.filter((h) => h.isPr).length,
+    };
+  }).filter(Boolean);
+
+  return {
+    season,
+    generatedAt: new Date().toISOString(),
+    overallSavePct: totalShots > 0 ? Math.round((agg.totalSaves / totalShots) * 100) : null,
+    totalShots,
+    weakestZones,
+    saveTrend: agg.trend.slice(-10),
+    completionRate,
+    sessionsCompleted: completed.length,
+    totalSessionsInPlans,
+    rpeTrend: rpeTrend(plans).map((r) => r.rpe),
+    streakWeeks: weeklyStreak(plans),
+    gymProgress,
+  };
+}
+
+// Category toggles + digest categories for the "Share with coach" feature.
+// Kept alongside EMAIL_ALERT_CATEGORIES above since it's the same shape of
+// idea (a keeper-controlled set of on/off switches), just for a different
+// recipient.
+export const COACH_SHARE_CATEGORIES = [
+  { id: "trainingLogs", label: "Training completion & session logs" },
+  { id: "matchStats", label: "Match stats" },
+  { id: "attendance", label: "Trainings/sessions attended" },
+];
+
+// Coach-scoped, category-filtered, and windowed to sinceDate (if given) —
+// unlike the keeper's own "Generate report" (all-time, on demand), a
+// periodic coach digest showing the full career history every single week
+// would be repetitive noise, so this scopes matchStats/trainingLogs/
+// attendance to whatever's happened since the window started rather than
+// reusing computeReportData's all-time view unfiltered.
+export function computeCoachReportData({ matches, plans, adHocSessions, exercises, season, categories = {}, sinceDate = null }) {
+  const inWindow = (dateStr) => !sinceDate || (dateStr && dateStr >= sinceDate);
+  const windowedMatches = (matches || []).filter((m) => inWindow(m.date));
+  const base = computeReportData({ matches: windowedMatches, plans, adHocSessions, exercises, season });
+
+  const out = { season, generatedAt: new Date().toISOString(), sinceDate };
+
+  if (categories.matchStats !== false) {
+    out.matchStats = {
+      overallSavePct: base.overallSavePct,
+      totalShots: base.totalShots,
+      weakestZones: base.weakestZones,
+      saveTrend: base.saveTrend,
+    };
+  }
+
+  if (categories.trainingLogs !== false) {
+    out.trainingLogs = {
+      completionRate: base.completionRate,
+      sessionsCompleted: base.sessionsCompleted,
+      totalSessionsInPlans: base.totalSessionsInPlans,
+      rpeTrend: base.rpeTrend,
+      streakWeeks: base.streakWeeks,
+      gymProgress: base.gymProgress,
+    };
+  }
+
+  if (categories.attendance !== false) {
+    const fromPlans = completedSessionsWithMeta(plans)
+      .filter(({ session }) => inWindow(session.date))
+      .map(({ session }) => ({ date: session.date, title: session.focus || "Training session" }));
+    const fromAdHoc = (adHocSessions || [])
+      .filter((s) => s.completed && inWindow(s.date))
+      .map((s) => ({ date: s.date, title: s.title || "One-off session" }));
+    out.attendance = [...fromPlans, ...fromAdHoc].sort((a, b) => new Date(a.date) - new Date(b.date));
+  }
+
+  return out;
+}
 
 // Full curated exercise library — pure data, moved here (not just
 // alert/domain logic) so the scheduled-alerts function can look up real

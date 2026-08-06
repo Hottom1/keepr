@@ -15,35 +15,15 @@
 import { getAllUserRows, getAllUserEmails, appendEmailAlertLog } from "../lib/supabaseAdmin.js";
 import { sendOutboundEmail } from "../lib/sendEmail.js";
 import { signUnsubscribeToken } from "../lib/unsubscribeToken.js";
+import { callKipDirect } from "../lib/callKipDirect.js";
 import { computeKipAlerts, describeAlertItem, categoryForAlertType, buildKipSystemPrompt, DEFAULT_EXERCISES } from "../../src/lib/kipDomain.js";
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SITE_URL = "https://keepr.coach";
 // A condition that's still true after this many days is worth mentioning
 // again rather than going silent forever, but re-alerting on literally
 // every run (daily) for something unresolved for a week would just be
 // noise — this sits between "once and never again" and "every day."
 const COOLDOWN_DAYS = 4;
-
-async function callKipDirect(system, userMessage) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-5",
-      max_tokens: 600,
-      system,
-      messages: [{ role: "user", content: userMessage }],
-    }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error?.message || "Kip email generation failed");
-  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-}
 
 function withinCooldown(fingerprint, log) {
   const entry = (log || []).find((e) => e.fingerprint === fingerprint);

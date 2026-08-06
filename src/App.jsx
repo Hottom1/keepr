@@ -6,9 +6,15 @@ import {
   Lightbulb, Eye, ShieldCheck, Zap, Brain, Compass, MessageCircle,
   Send, Sparkles, AlertTriangle, BarChart3, TrendingUp, LogOut, Flame, RotateCcw, Video,
   ClipboardList, Paperclip, Upload, Trophy, Bell, BellOff, Lock,
+  UserPlus, Link2, Mail,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { loadUserData, saveUserData, uploadNiggleFile, uploadGeneralFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
+import {
+  getMyInviteCode, regenerateMyInviteCode, redeemInviteCode, acceptConnection, declineConnection,
+  revokeConnection, setRecordingPermission, getMyConnections, summarizeConnections, partnerOf, myOutgoingGrant,
+  createOrResumeTeammateMatch, patchTeammateMatch, deleteTeammateMatch,
+} from "./lib/connections.js";
 import { supabase } from "./lib/supabaseClient.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
 import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
@@ -29,6 +35,7 @@ import {
   shotTypeTallies, shotTypeTrendSignals, missedSessionsSignals, rpeHighSignal, streakAtRiskSignal, NIGGLE_QUIET_DAYS,
   niggleQuietSignals, newPrSignals, completedBlockSignals, computeKipAlerts, describeAlertItem,
   EMAIL_ALERT_CATEGORIES, categoryForAlertType, DEFAULT_EXERCISES,
+  computeReportData, computeCoachReportData, COACH_SHARE_CATEGORIES,
 } from "./lib/kipDomain.js";
 
 /* ---------------------------------------------------------------- */
@@ -776,15 +783,26 @@ export default function GKTrainerApp() {
             adHocSessions={adHocSessions}
             exercises={allExercises}
             onOpenKip={onOpenKip}
+            teammateOwnerId={activeLiveTarget.teammateOwnerId || null}
+            teammateEmail={activeLiveTarget.teammateEmail || null}
             onUpdatePatch={(patch) => saveMatch({ ...liveMatch, ...patch })}
-            onFinish={(patch) => {
+            onFinish={(patch, teammateMatchId) => {
               const { recording, ...rest } = liveMatch;
               saveMatch({ ...rest, ...patch });
+              if (activeLiveTarget.teammateOwnerId && teammateMatchId) {
+                const teammatePatch = { recording: null };
+                if ("competition" in patch) teammatePatch.competition = patch.competition;
+                if ("result" in patch) teammatePatch.result = patch.result;
+                patchTeammateMatch(activeLiveTarget.teammateOwnerId, teammateMatchId, teammatePatch).catch(() => {});
+              }
               setActiveLiveTarget(null);
             }}
             onExit={() => setActiveLiveTarget(null)}
-            onDelete={() => {
+            onDelete={(teammateMatchId) => {
               deleteMatch(liveMatch.id);
+              if (activeLiveTarget.teammateOwnerId && teammateMatchId) {
+                deleteTeammateMatch(activeLiveTarget.teammateOwnerId, teammateMatchId).catch(() => {});
+              }
               setActiveLiveTarget(null);
             }}
           />
@@ -2147,7 +2165,25 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
 // immediately sees it as "in progress" too — one shared source of truth.
 function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, onSaveAdHoc, onSaveMatch, onSaveOpponentRoster, onOpenLiveRecorder }) {
   const [showLiveMatchForm, setShowLiveMatchForm] = useState(false);
+  const [teammateOptions, setTeammateOptions] = useState([]);
   const active = findActiveRecording({ plans, adHocSessions, matches });
+
+  // Who can currently record matches for -- i.e. an accepted connection
+  // where the OTHER side has granted the current user recording rights.
+  // Fetched once on mount; connections change rarely enough that Record
+  // tab doesn't need to react live to Profile's Teammates card.
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        const rows = await getMyConnections();
+        const { canRecordFor } = summarizeConnections(rows, user?.id);
+        setTeammateOptions(canRecordFor.map((c) => partnerOf(c, user?.id)).map((p) => ({ ownerId: p.id, email: p.email })));
+      } catch (e) {
+        setTeammateOptions([]);
+      }
+    })();
+  }, []);
 
   function startTraining() {
     const next = nextSuggestedSession(plans);
@@ -2218,14 +2254,16 @@ function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, o
           matches={matches}
           opponents={opponents}
           onSaveOpponentRoster={onSaveOpponentRoster}
+          teammateOptions={teammateOptions}
           title="Start a live match"
           submitLabel="Start recording"
           onClose={() => setShowLiveMatchForm(false)}
           onSave={(m) => {
-            const withRecording = { ...m, recording: startRecording() };
+            const { teammateOwnerId, teammateEmail, ...matchFields } = m;
+            const withRecording = { ...matchFields, recording: startRecording() };
             onSaveMatch(withRecording);
             setShowLiveMatchForm(false);
-            onOpenLiveRecorder({ kind: "match", matchId: withRecording.id });
+            onOpenLiveRecorder({ kind: "match", matchId: withRecording.id, teammateOwnerId: teammateOwnerId || null, teammateEmail: teammateEmail || null });
           }}
         />
       )}
@@ -3572,6 +3610,8 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
         </button>
       </div>
       <NotificationsSection profile={profile} onSaveProfile={onSaveProfile} />
+      <TeammatesSection />
+      <CoachSharingSection profile={profile} onSaveProfile={onSaveProfile} />
       <KipOnboarding
         profile={profile}
         onSave={onSaveProfile}
@@ -3658,6 +3698,351 @@ function NotificationsSection({ profile, onSaveProfile }) {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Connections live in their own Supabase table (migration 0005), not in the
+// per-user JSONB blob everything else here reads/writes — mutual-consent
+// requests and permission grants inherently span two accounts, which the
+// blob's strict RLS (auth.uid() = user_id, no exceptions) can't express.
+// So this section owns its own fetch/refresh state instead of going through
+// updateAndSave like the rest of Profile.
+function TeammatesSection() {
+  const [viewerId, setViewerId] = useState(null);
+  const [inviteCode, setInviteCode] = useState(null);
+  const [connections, setConnections] = useState(null); // null = still loading
+  const [redeemInput, setRedeemInput] = useState("");
+  const [redeemError, setRedeemError] = useState(null);
+  const [redeeming, setRedeeming] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState(null);
+
+  async function refresh() {
+    const { data: { user } } = await supabase.auth.getUser();
+    setViewerId(user?.id || null);
+    const [code, rows] = await Promise.all([getMyInviteCode(), getMyConnections()]);
+    setInviteCode(code);
+    setConnections(rows);
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  async function handleRegenerate() {
+    const code = await regenerateMyInviteCode();
+    setInviteCode(code);
+  }
+
+  function copyCode() {
+    if (!inviteCode) return;
+    navigator.clipboard?.writeText(inviteCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  async function handleRedeem() {
+    if (!redeemInput.trim()) return;
+    setRedeeming(true);
+    setRedeemError(null);
+    try {
+      await redeemInviteCode(redeemInput);
+      setRedeemInput("");
+      await refresh();
+    } catch (e) {
+      setRedeemError(e.message?.includes("not found") ? "That code doesn't match any account." : e.message?.includes("yourself") ? "That's your own code." : "Couldn't send that request — try again.");
+    } finally {
+      setRedeeming(false);
+    }
+  }
+
+  async function withBusy(id, fn) {
+    setBusyId(id);
+    try {
+      await fn();
+      await refresh();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (connections === null) return null;
+
+  const { incomingPending, outgoingPending, accepted } = summarizeConnections(connections, viewerId);
+
+  return (
+    <div className="px-4 pt-4">
+      <div className="bg-white rounded-lg border p-3.5 mb-2" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-sm font-bold mb-1 flex items-center gap-1.5" style={{ color: "#12213A" }}>
+          <Link2 size={14} color="#0E8388" /> Your invite code
+        </div>
+        <p className="text-xs text-gray-500 mb-2">Share this with a teammate so they can connect with you. Connecting needs both sides to agree — sharing the code alone doesn't do anything on its own.</p>
+        <div className="flex gap-2 mb-1">
+          <button onClick={copyCode} className="flex-1 text-left rounded-md px-2.5 py-2 text-sm font-mono font-bold tracking-wide" style={{ background: "#F3F2ED", color: "#12213A" }}>
+            {inviteCode || "…"}
+          </button>
+          <button onClick={handleRegenerate} className="px-3 rounded-md text-[11px] font-semibold border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
+            New code
+          </button>
+        </div>
+        {copied && <div className="text-[10px] font-semibold mb-2" style={{ color: "#0E8388" }}>Copied</div>}
+
+        <div className="mt-3 pt-3 border-t" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-xs font-bold mb-1.5" style={{ color: "#12213A" }}>Have a teammate's code?</div>
+          <div className="flex gap-2">
+            <input
+              className="flex-1 rounded-md px-2.5 py-2 text-sm border font-mono uppercase"
+              style={{ borderColor: "#DAD7CC" }}
+              placeholder="e.g. A1B2C3D"
+              value={redeemInput}
+              onChange={(e) => { setRedeemInput(e.target.value); setRedeemError(null); }}
+              maxLength={12}
+            />
+            <button
+              disabled={!redeemInput.trim() || redeeming}
+              onClick={handleRedeem}
+              className="px-3.5 rounded-md text-xs font-bold text-white disabled:opacity-40 flex items-center gap-1"
+              style={{ background: "#0E8388" }}
+            >
+              <UserPlus size={13} /> Connect
+            </button>
+          </div>
+          {redeemError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{redeemError}</div>}
+        </div>
+      </div>
+
+      {incomingPending.length > 0 && (
+        <div className="bg-white rounded-lg border p-3.5 mb-2" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-sm font-bold mb-2" style={{ color: "#12213A" }}>Requests</div>
+          <div className="space-y-2">
+            {incomingPending.map((c) => (
+              <div key={c.id} className="flex items-center justify-between rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
+                <div className="text-xs font-semibold break-all pr-2" style={{ color: "#12213A" }}>{c.requester_email || "A keeper"}</div>
+                <div className="flex gap-1.5 shrink-0">
+                  <button
+                    disabled={busyId === c.id}
+                    onClick={() => withBusy(c.id, () => acceptConnection(c.id))}
+                    className="px-2.5 py-1 rounded-md text-[11px] font-bold text-white disabled:opacity-40"
+                    style={{ background: "#0E8388" }}
+                  >
+                    Accept
+                  </button>
+                  <button
+                    disabled={busyId === c.id}
+                    onClick={() => withBusy(c.id, () => declineConnection(c.id))}
+                    className="px-2.5 py-1 rounded-md text-[11px] font-bold disabled:opacity-40"
+                    style={{ color: "#8A8779" }}
+                  >
+                    Decline
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(accepted.length > 0 || outgoingPending.length > 0) && (
+        <div className="bg-white rounded-lg border p-3.5 mb-4" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-sm font-bold mb-2" style={{ color: "#12213A" }}>Your teammates</div>
+          <div className="space-y-2">
+            {outgoingPending.map((c) => {
+              const partner = partnerOf(c, viewerId);
+              return (
+                <div key={c.id} className="flex items-center justify-between rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
+                  <div className="text-xs pr-2" style={{ color: "#8A8779" }}>Waiting for {partner.email || "them"} to accept</div>
+                  <button
+                    disabled={busyId === c.id}
+                    onClick={() => withBusy(c.id, () => revokeConnection(c.id))}
+                    className="text-[11px] font-semibold shrink-0"
+                    style={{ color: "#C1483B" }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              );
+            })}
+            {accepted.map((c) => {
+              const partner = partnerOf(c, viewerId);
+              const iGrant = myOutgoingGrant(c, viewerId);
+              return (
+                <div key={c.id} className="rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="text-xs font-semibold break-all pr-2" style={{ color: "#12213A" }}>{partner.email || "A keeper"}</div>
+                    <button
+                      disabled={busyId === c.id}
+                      onClick={() => setConfirmRevokeId(c.id)}
+                      className="text-[11px] font-semibold shrink-0"
+                      style={{ color: "#C1483B" }}
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                  <button
+                    disabled={busyId === c.id}
+                    onClick={() => withBusy(c.id, () => setRecordingPermission(c.id, !iGrant))}
+                    className="w-full flex items-center justify-between rounded-md px-2 py-1.5 text-[11px] disabled:opacity-40"
+                    style={{ background: "#fff", border: "1px solid #DAD7CC" }}
+                  >
+                    <span style={{ color: "#12213A" }}>Let them record matches for me</span>
+                    {iGrant ? <CheckCircle2 size={14} color="#0E8388" /> : <Circle size={14} color="#DAD7CC" />}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {confirmRevokeId && (
+        <Modal onClose={() => setConfirmRevokeId(null)}>
+          <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Disconnect?</h3>
+          <p className="text-sm text-gray-600 mb-4">Matches already recorded stay exactly as they are — this only stops any future recording-on-behalf between you two. You'd need a new invite to reconnect.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmRevokeId(null)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Cancel</button>
+            <button
+              onClick={() => { const id = confirmRevokeId; setConfirmRevokeId(null); withBusy(id, () => revokeConnection(id)); }}
+              className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white"
+              style={{ background: "#C1483B" }}
+            >
+              Disconnect
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Unlike TeammatesSection, everything here lives entirely in the keeper's
+// own profile blob — a coach's email is just a field, not a second account
+// with its own consent flow (see DECISIONS.md: no coach-side login was ever
+// in scope). So this reads/writes through the normal onSaveProfile path,
+// no separate fetch/refresh state needed.
+function CoachSharingSection({ profile, onSaveProfile }) {
+  const [emailInput, setEmailInput] = useState(profile.coachEmail || "");
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState(null);
+
+  const coachEmail = profile.coachEmail || "";
+  const categories = profile.coachShareCategories || { trainingLogs: true, matchStats: true, attendance: true };
+  const cadence = profile.coachDigestCadence || "weekly";
+
+  function addCoach() {
+    if (!emailInput.trim()) return;
+    onSaveProfile({
+      ...profile,
+      coachEmail: emailInput.trim(),
+      coachShareCategories: profile.coachShareCategories || { trainingLogs: true, matchStats: true, attendance: true },
+      coachDigestCadence: profile.coachDigestCadence || "weekly",
+    });
+  }
+
+  function removeCoach() {
+    setEmailInput("");
+    onSaveProfile({ ...profile, coachEmail: "" });
+  }
+
+  function toggleCategory(id) {
+    onSaveProfile({ ...profile, coachShareCategories: { ...categories, [id]: categories[id] === false ? true : false } });
+  }
+
+  function setCadence(next) {
+    onSaveProfile({ ...profile, coachDigestCadence: next });
+  }
+
+  async function sendNow() {
+    setSending(true);
+    setSendResult(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch("/.netlify/functions/send-coach-digest-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Send failed");
+      setSendResult({ ok: true, message: "Sent — check with them in a bit." });
+    } catch (e) {
+      setSendResult({ ok: false, message: "Couldn't send just now — try again shortly." });
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="px-4 pt-4">
+      <div className="bg-white rounded-lg border p-3.5 mb-4" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-sm font-bold mb-1 flex items-center gap-1.5" style={{ color: "#12213A" }}>
+          <Mail size={14} color="#0E8388" /> Share with coach
+        </div>
+        <p className="text-xs text-gray-500 mb-2">Send your coach a periodic email digest — they don't need a Keepr account, it's just an email. You choose what's in it.</p>
+
+        {!coachEmail ? (
+          <div className="flex gap-2">
+            <input
+              className="flex-1 rounded-md px-2.5 py-2 text-sm border"
+              style={{ borderColor: "#DAD7CC" }}
+              placeholder="coach@example.com"
+              type="email"
+              value={emailInput}
+              onChange={(e) => setEmailInput(e.target.value)}
+            />
+            <button disabled={!emailInput.trim()} onClick={addCoach} className="px-3.5 rounded-md text-xs font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+              Add
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center justify-between rounded-md px-2.5 py-2 mb-2.5" style={{ background: "#F3F2ED" }}>
+              <div className="text-xs font-semibold break-all pr-2" style={{ color: "#12213A" }}>{coachEmail}</div>
+              <button onClick={removeCoach} className="text-[11px] font-semibold shrink-0" style={{ color: "#C1483B" }}>Remove</button>
+            </div>
+
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Include</div>
+            <div className="space-y-1.5 mb-3">
+              {COACH_SHARE_CATEGORIES.map((cat) => {
+                const on = categories[cat.id] !== false;
+                return (
+                  <button
+                    key={cat.id}
+                    onClick={() => toggleCategory(cat.id)}
+                    className="w-full flex items-center justify-between rounded-md px-2.5 py-2 text-xs"
+                    style={{ background: "#F3F2ED" }}
+                  >
+                    <span style={{ color: "#12213A" }}>{cat.label}</span>
+                    {on ? <CheckCircle2 size={15} color="#0E8388" /> : <Circle size={15} color="#DAD7CC" />}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">How often</div>
+            <div className="flex gap-2 mb-3">
+              {["weekly", "monthly"].map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setCadence(c)}
+                  className="flex-1 py-2 rounded-lg text-xs font-bold border capitalize"
+                  style={cadence === c ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+
+            <button disabled={sending} onClick={sendNow} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+              {sending ? "Sending…" : "Send now"}
+            </button>
+            {sendResult && (
+              <div className="text-[11px] font-semibold mt-1.5 text-center" style={{ color: sendResult.ok ? "#0E8388" : "#C1483B" }}>{sendResult.message}</div>
+            )}
+            {profile.lastCoachDigestSentAt && (
+              <div className="text-[10px] text-gray-400 mt-1.5 text-center">Last sent {formatShortDate(profile.lastCoachDigestSentAt.slice(0, 10))}</div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -4212,51 +4597,10 @@ function executeKipTool(name, input, ctx) {
 /* asking Kip to narrate them. "Compute then narrate" is already a      */
 /* proven shape in this app; a report is that shape with more data in  */
 /* one pass, not a reason to route through tool-use.                   */
+/* computeReportData itself now lives in kipDomain.js (imported above) */
+/* so the server-side coach-digest function can call the exact same    */
+/* computation — this file only keeps the parts that need callKip.     */
 /* ---------------------------------------------------------------- */
-
-function computeReportData({ matches, plans, adHocSessions, exercises, season }) {
-  const agg = aggregateMatchStats(matches, season);
-  const totalShots = agg.totalSaves + agg.totalGoals;
-  const zoneEntries = Object.entries(agg.zones)
-    .filter(([, z]) => z.saves + z.goals > 0)
-    .map(([zone, z]) => ({ zone, label: ZONE_LABELS[zone], savePct: Math.round((z.saves / (z.saves + z.goals)) * 100), shots: z.saves + z.goals }));
-  const weakestZones = [...zoneEntries].sort((a, b) => a.savePct - b.savePct).slice(0, 3);
-
-  const completed = completedSessionsWithMeta(plans);
-  const totalSessionsInPlans = plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.length, 0), 0);
-  const completionRate = totalSessionsInPlans > 0 ? Math.round((completed.length / totalSessionsInPlans) * 100) : null;
-
-  const gymIds = [...loggedGymExerciseIds(plans, adHocSessions)];
-  const gymProgress = gymIds.map((id) => {
-    const ex = exercises.find((e) => e.id === id);
-    const history = exerciseLogHistory(plans, id, adHocSessions);
-    if (!ex || history.length === 0) return null;
-    const latest = history[history.length - 1];
-    const first = history[0];
-    return {
-      exercise: ex.name,
-      sessionsLogged: history.length,
-      latestTopWeight: latest.topWeight,
-      trend: history.length > 1 ? (latest.topWeight > first.topWeight ? "up" : latest.topWeight < first.topWeight ? "down" : "flat") : "single session",
-      prCount: history.filter((h) => h.isPr).length,
-    };
-  }).filter(Boolean);
-
-  return {
-    season,
-    generatedAt: new Date().toISOString(),
-    overallSavePct: totalShots > 0 ? Math.round((agg.totalSaves / totalShots) * 100) : null,
-    totalShots,
-    weakestZones,
-    saveTrend: agg.trend.slice(-10),
-    completionRate,
-    sessionsCompleted: completed.length,
-    totalSessionsInPlans,
-    rpeTrend: rpeTrend(plans).map((r) => r.rpe),
-    streakWeeks: weeklyStreak(plans),
-    gymProgress,
-  };
-}
 
 async function generateKipReport({ profile, plans, season, matches, exercises, adHocSessions }) {
   const data = computeReportData({ matches, plans, adHocSessions, exercises, season });
@@ -4952,10 +5296,11 @@ function OpponentDetailModal({ opponentName, opponents, matches, onClose, onSave
   );
 }
 
-function MatchFormModal({ season, matches, onClose, onSave, initialDate, title = "New match", submitLabel = "Create match", opponents = [], onSaveOpponentRoster }) {
-  const [form, setForm] = useState({ date: initialDate || new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "" });
+function MatchFormModal({ season, matches, onClose, onSave, initialDate, title = "New match", submitLabel = "Create match", opponents = [], onSaveOpponentRoster, teammateOptions = [] }) {
+  const [form, setForm] = useState({ date: initialDate || new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "", teammateOwnerId: null });
   const [rosterOpen, setRosterOpen] = useState(false);
   const valid = form.date && form.opponent.trim();
+  const selectedTeammate = teammateOptions.find((t) => t.ownerId === form.teammateOwnerId) || null;
   return (
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>{title}</h3>
@@ -4988,7 +5333,48 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate, title =
         <Field label="Video link (optional)">
           <input className="input" placeholder="YouTube, Drive, wherever the footage lives" value={form.videoUrl} onChange={(e) => setForm({ ...form, videoUrl: e.target.value })} />
         </Field>
-        <button disabled={!valid} onClick={() => onSave({ id: uid(), ...form, shots: [] })} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+        {teammateOptions.length > 0 && (
+          <Field label="Recording with a teammate?">
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => setForm({ ...form, teammateOwnerId: null })}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
+                style={!form.teammateOwnerId ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+              >
+                Just me
+              </button>
+              {teammateOptions.map((t) => (
+                <button
+                  key={t.ownerId}
+                  onClick={() => setForm({ ...form, teammateOwnerId: t.ownerId })}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
+                  style={form.teammateOwnerId === t.ownerId ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                >
+                  {t.email}
+                </button>
+              ))}
+            </div>
+            {selectedTeammate && (
+              <p className="text-[11px] text-gray-500 mt-1.5">
+                You'll get a switch to move between recording your own shots and {selectedTeammate.email}'s — theirs goes straight into their own account, and they can review or correct it afterward.
+              </p>
+            )}
+          </Field>
+        )}
+        <button
+          disabled={!valid}
+          onClick={() => {
+            const { teammateOwnerId, ...matchFields } = form;
+            onSave({
+              id: uid(),
+              ...matchFields,
+              shots: [],
+              ...(teammateOwnerId ? { teammateOwnerId, teammateEmail: selectedTeammate?.email || null } : {}),
+            });
+          }}
+          className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
+          style={{ background: "#0E8388" }}
+        >
           {submitLabel}
         </button>
       </div>
@@ -5072,6 +5458,11 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
         <div>
           <div className="text-lg font-black" style={{ color: "#12213A" }}>vs {match.opponent}</div>
           <div className="text-xs text-gray-500">{match.date}{match.competition ? ` · ${match.competition}` : ""}{match.result ? ` · ${match.result}` : ""}</div>
+          {match.recordedBy && (
+            <div className="flex items-center gap-1 text-[11px] font-semibold mt-0.5" style={{ color: "#0E8388" }}>
+              <UserPlus size={11} /> Recorded by {match.recordedByEmail || "a teammate"} — edit anything below to correct it
+            </div>
+          )}
           <OpponentHistoryNote matches={matches} opponent={match.opponent} excludeId={match.id} roster={findOpponentRoster(opponents, match.opponent)?.roster} onTap={() => setRosterOpen(true)} />
         </div>
         <SeasonBadge season={match.season} />
@@ -5183,44 +5574,77 @@ function MatchWrapUpModal({ match, durationMinutes, onClose, onSave }) {
   );
 }
 
-function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete, profile, season, plans, matches, adHocSessions, exercises, onOpenKip }) {
+function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete, profile, season, plans, matches, adHocSessions, exercises, onOpenKip, teammateOwnerId, teammateEmail }) {
   const [now, setNow] = useState(Date.now());
   const [zoneTap, setZoneTap] = useState(null);
   const [wrappingUp, setWrappingUp] = useState(false);
   const [confirmDeleting, setConfirmDeleting] = useState(false);
   const [showKipPanel, setShowKipPanel] = useState(false);
+  const [activeRecorder, setActiveRecorder] = useState("self");
+  const [teammateMatch, setTeammateMatch] = useState(null);
+  const [teammateError, setTeammateError] = useState(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
+  // Created (or resumed, if this exact fixture was already started) the
+  // moment a teammate is linked — not deferred until the switch is first
+  // tapped — so the switch is immediately usable and there's no
+  // create-on-first-tap latency mid-recording.
+  useEffect(() => {
+    if (!teammateOwnerId) return;
+    let cancelled = false;
+    createOrResumeTeammateMatch({ ownerId: teammateOwnerId, opponent: match.opponent, date: match.date, competition: match.competition, season: match.season })
+      .then((m) => { if (!cancelled) setTeammateMatch(m); })
+      .catch((e) => { if (!cancelled) setTeammateError(e.message || "Couldn't set up their match"); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teammateOwnerId]);
+
   const recording = match.recording;
   const isPaused = !!recording?.pausedAt;
   const elapsed = recordingElapsedMs(recording, now);
 
+  const activeMatch = activeRecorder === "teammate" && teammateMatch ? teammateMatch : match;
+
   const zones = emptyZoneMap();
-  (match.shots || []).forEach((s) => {
+  (activeMatch.shots || []).forEach((s) => {
     if (!zones[s.zone]) return;
     if (s.outcome === "Save") zones[s.zone].saves++;
     else zones[s.zone].goals++;
   });
-  const totalShots = (match.shots || []).length;
-  const totalSaves = (match.shots || []).filter((s) => s.outcome === "Save").length;
+  const totalShots = (activeMatch.shots || []).length;
+  const totalSaves = (activeMatch.shots || []).filter((s) => s.outcome === "Save").length;
   const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
 
   function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber }) {
     const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null };
-    onUpdatePatch({ shots: [...(match.shots || []), shot] });
+    const nextShots = [...(activeMatch.shots || []), shot];
+    if (activeRecorder === "teammate" && teammateMatch) {
+      patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
+        .then((updated) => setTeammateMatch(updated))
+        .catch((e) => { setTeammateError(e.message || "Couldn't save that shot to their account"); setActiveRecorder("self"); });
+    } else {
+      onUpdatePatch({ shots: nextShots });
+    }
     setZoneTap(null);
   }
   function removeShot(id) {
-    onUpdatePatch({ shots: (match.shots || []).filter((s) => s.id !== id) });
+    const nextShots = (activeMatch.shots || []).filter((s) => s.id !== id);
+    if (activeRecorder === "teammate" && teammateMatch) {
+      patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
+        .then((updated) => setTeammateMatch(updated))
+        .catch((e) => { setTeammateError(e.message || "Couldn't update their match"); setActiveRecorder("self"); });
+    } else {
+      onUpdatePatch({ shots: nextShots });
+    }
   }
 
   function finish() {
     if (!match.competition && !match.result) setWrappingUp(true);
-    else onFinish({ durationMinutes: recordingElapsedMinutes(recording) });
+    else onFinish({ durationMinutes: recordingElapsedMinutes(recording) }, teammateMatch?.id);
   }
 
   return (
@@ -5253,6 +5677,30 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
         </div>
       </div>
 
+      {teammateOwnerId && (
+        <div className="shrink-0 px-4 pt-3 bg-white">
+          <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Now recording for</div>
+          <div className="flex rounded-lg border p-1" style={{ borderColor: "#DAD7CC" }}>
+            <button
+              onClick={() => setActiveRecorder("self")}
+              className="flex-1 py-1.5 rounded-md text-xs font-bold"
+              style={activeRecorder === "self" ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
+            >
+              Me
+            </button>
+            <button
+              disabled={!teammateMatch}
+              onClick={() => setActiveRecorder("teammate")}
+              className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
+              style={activeRecorder === "teammate" ? { background: "#0E8388", color: "#fff" } : { color: "#8A8779" }}
+            >
+              {teammateMatch ? teammateEmail : "Setting up…"}
+            </button>
+          </div>
+          {teammateError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{teammateError}</div>}
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-4 py-3">
         <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Tap a zone to log a shot</div>
         <GoalGrid zones={zones} onZoneTap={(z) => setZoneTap(z)} />
@@ -5261,7 +5709,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
           <div className="mt-4">
             <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Logged shots</div>
             <div className="space-y-1.5">
-              {[...(match.shots || [])].reverse().map((s) => (
+              {[...(activeMatch.shots || [])].reverse().map((s) => (
                 <div key={s.id} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
                   <div className="flex items-center gap-2 text-xs">
                     <span className="font-bold" style={{ color: s.outcome === "Save" ? "#0E8388" : "#C1483B" }}>{s.outcome}</span>
@@ -5290,7 +5738,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
         </button>
       </div>
 
-      {zoneTap && <ShotLogModal season={match.season} zone={zoneTap} videoUrl={match.videoUrl} roster={findOpponentRoster(opponents, match.opponent)?.roster} onClose={() => setZoneTap(null)} onSave={logShot} />}
+      {zoneTap && <ShotLogModal season={activeMatch.season} zone={zoneTap} videoUrl={activeMatch.videoUrl} roster={findOpponentRoster(opponents, activeMatch.opponent)?.roster} onClose={() => setZoneTap(null)} onSave={logShot} />}
 
       {showKipPanel && (
         <KipQuickPanel
@@ -5311,10 +5759,13 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
       {confirmDeleting && (
         <Modal onClose={() => setConfirmDeleting(false)}>
           <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Delete this match?</h3>
-          <p className="text-sm text-gray-600 mb-4">This match was created for this recording, so deleting it removes it — and any shots already logged — completely. This can't be undone.</p>
+          <p className="text-sm text-gray-600 mb-4">
+            This match was created for this recording, so deleting it removes it — and any shots already logged — completely.
+            {teammateMatch ? ` Their linked match (and its shots) goes too.` : ""} This can't be undone.
+          </p>
           <div className="flex gap-2">
             <button onClick={() => setConfirmDeleting(false)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Keep it</button>
-            <button onClick={onDelete} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Delete</button>
+            <button onClick={() => onDelete(teammateMatch?.id)} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Delete</button>
           </div>
         </Modal>
       )}
@@ -5324,7 +5775,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
           match={match}
           durationMinutes={recordingElapsedMinutes(recording)}
           onClose={() => setWrappingUp(false)}
-          onSave={(patch) => onFinish(patch)}
+          onSave={(patch) => onFinish(patch, teammateMatch?.id)}
         />
       )}
     </div>
@@ -5510,6 +5961,11 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
               <div>
                 <div className="text-sm font-bold" style={{ color: "#12213A" }}>vs {m.opponent}</div>
                 <div className="text-[11px] text-gray-500">{m.date}{m.result ? ` · ${m.result}` : ""} · {shots.length ? `${saves}/${shots.length} saved` : "No shots logged"}</div>
+                {m.recordedBy && (
+                  <div className="flex items-center gap-1 text-[10px] font-semibold mt-0.5" style={{ color: "#0E8388" }}>
+                    <UserPlus size={10} /> Recorded by {m.recordedByEmail || "a teammate"}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <SeasonBadge season={m.season} />
