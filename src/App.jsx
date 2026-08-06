@@ -21,7 +21,7 @@ import { useAuth } from "./auth/AuthProvider.jsx";
 import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
 import {
   CATS, GOALS, PHASES, ZONE_GRID, ZONE_LABELS, INDOOR_SHOT_TYPES, BEACH_SHOT_TYPES, BEACH_TWO_POINT_TYPES,
-  shotTypesFor, pointsForShot, emptyZoneMap, aggregateMatchStats, aggregateShotTypeStats, normalizeOpponentName,
+  shotTypesFor, pointsForShot, emptyZoneMap, aggregateMatchStats, aggregateShotTypeStats, POSITIONS, aggregatePositionStats, normalizeOpponentName,
   opponentRecord, findOpponentRoster, upsertOpponentRoster, shooterStats, mostDangerousShooter, parseTimestampToSeconds,
   videoLinkForShot, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
   excludedExerciseIdsForNiggles, NEAR_POST_ZONES, LOW_ZONES, EXERCISE_ZONE_MAP, EXERCISE_SHOTTYPE_MAP,
@@ -336,6 +336,10 @@ export default function GKTrainerApp() {
   function openHelp(articleId = null) {
     setHelpTarget(articleId ? { articleId } : {});
   }
+  // Setup screen shown before a NEW recording starts — null closed,
+  // {kind:"training"} or {kind:"match"} open. Resuming an in-progress
+  // recording never touches this, only starting fresh does.
+  const [pendingSetup, setPendingSetup] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -442,6 +446,44 @@ export default function GKTrainerApp() {
     const exists = matches.some((m) => m.id === match.id);
     const next = exists ? matches.map((m) => (m.id === match.id ? match : m)) : [...matches, match];
     updateAndSave({ nextMatches: next });
+  }
+
+  // Nothing is created or persisted while a setup screen is open — unlike
+  // the old flow, where tapping "Record" immediately created the session/
+  // match with a running clock. beginTrainingRecording/beginMatchRecording
+  // below are the only places that actually create anything and start the
+  // clock, and they only run once Start is tapped. Resuming an already-
+  // in-progress recording (recording field already set) skips this
+  // entirely and goes straight to the live recorder, same as before.
+  function beginTrainingRecording({ title, focus } = {}) {
+    const next = nextSuggestedSession(plans);
+    if (next) {
+      const nextPlan = {
+        ...next.plan,
+        weeks: next.plan.weeks.map((ww) => ww.weekId === next.week.weekId
+          ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === next.session.sessionId ? { ...ss, focus: focus ?? ss.focus, recording: startRecording() } : ss)) }
+          : ww),
+      };
+      savePlan(nextPlan);
+      setActiveLiveTarget({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: focus ?? next.session.focus });
+    } else {
+      const session = {
+        id: uid(), title: title?.trim() || "Training session", notes: "", date: new Date().toISOString().slice(0, 10),
+        exerciseIds: [], doneExerciseIds: [], exerciseLogs: {},
+        completed: false, rpe: null, note: "", completedAt: null,
+        recording: startRecording(),
+      };
+      saveAdHocSession(session);
+      setActiveLiveTarget({ kind: "adhoc", sessionId: session.id });
+    }
+    setPendingSetup(null);
+  }
+
+  function beginMatchRecording(fields, teammate) {
+    const withRecording = { id: uid(), ...fields, shots: [], recording: startRecording() };
+    saveMatch(withRecording);
+    setActiveLiveTarget({ kind: "match", matchId: withRecording.id, teammateOwnerId: teammate?.ownerId || null, teammateEmail: teammate?.email || null });
+    setPendingSetup(null);
   }
 
   function deleteMatch(id) {
@@ -628,6 +670,7 @@ export default function GKTrainerApp() {
             onConfirmCalendarSuggestion={confirmCalendarSuggestion}
             onDiscardCalendarSuggestion={discardCalendarSuggestion}
             onOpenHelp={openHelp}
+            onOpenTrainingSetup={() => setPendingSetup({ kind: "training" })}
           />
         )}
         {tab === "record" && (
@@ -635,14 +678,9 @@ export default function GKTrainerApp() {
             plans={plans}
             adHocSessions={adHocSessions}
             matches={matches}
-            exercises={allExercises}
-            season={season}
-            opponents={opponents}
-            onSave={savePlan}
-            onSaveAdHoc={saveAdHocSession}
-            onSaveMatch={saveMatch}
-            onSaveOpponentRoster={saveOpponentRoster}
             onOpenLiveRecorder={setActiveLiveTarget}
+            onOpenTrainingSetup={() => setPendingSetup({ kind: "training" })}
+            onOpenMatchSetup={() => setPendingSetup({ kind: "match" })}
             onOpenHelp={() => openHelp("record-live")}
           />
         )}
@@ -673,9 +711,11 @@ export default function GKTrainerApp() {
             onSaveOpponentRoster={saveOpponentRoster}
             onOpenLiveRecorder={setActiveLiveTarget}
             profile={profile}
+            onSaveProfile={saveProfile}
             reports={reports}
             onReportGenerated={addReportAndNotify}
             onOpenHelp={() => openHelp("stats-log-match")}
+            onOpenMatchSetup={() => setPendingSetup({ kind: "match" })}
           />
         )}
         {tab === "kip" && (
@@ -821,6 +861,25 @@ export default function GKTrainerApp() {
         );
       })()}
 
+      {pendingSetup?.kind === "training" && (
+        <TrainingSetupScreen
+          plans={plans}
+          exercises={allExercises}
+          onStart={beginTrainingRecording}
+          onClose={() => setPendingSetup(null)}
+        />
+      )}
+      {pendingSetup?.kind === "match" && (
+        <MatchSetupScreen
+          season={season}
+          matches={matches}
+          opponents={opponents}
+          onSaveOpponentRoster={saveOpponentRoster}
+          onStart={beginMatchRecording}
+          onClose={() => setPendingSetup(null)}
+        />
+      )}
+
       <BottomNav tab={tab} setTab={setTab} hasKipAlert={hasKipAlert} />
 
       {!helpTarget && <HelpWidget onOpen={() => openHelp()} />}
@@ -889,9 +948,9 @@ function TopBar({ season, setSeason }) {
 
 function BottomNav({ tab, setTab, hasKipAlert }) {
   const items = [
-    { id: "library", label: "Library", Icon: BookOpen },
-    { id: "record", label: "Record", Icon: Circle },
     { id: "plans", label: "Plans", Icon: ListChecks },
+    { id: "record", label: "Record", Icon: Circle },
+    { id: "library", label: "Library", Icon: BookOpen },
     { id: "profile", label: "Profile", Icon: User },
     { id: "stats", label: "Stats", Icon: BarChart3 },
     { id: "kip", label: "Kip", Icon: Sparkles },
@@ -1901,7 +1960,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2050,16 +2109,11 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
           />
           <button
             onClick={() => {
-              if (!next.session.recording) {
-                const next2 = {
-                  ...next.plan,
-                  weeks: next.plan.weeks.map((ww) => ww.weekId === next.week.weekId
-                    ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === next.session.sessionId ? { ...ss, recording: startRecording() } : ss)) }
-                    : ww),
-                };
-                onSave(next2);
+              if (next.session.recording) {
+                onOpenLiveRecorder({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
+              } else {
+                onOpenTrainingSetup();
               }
-              onOpenLiveRecorder({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
             }}
             className="w-full py-2.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2"
             style={{ background: "#0E8388" }}
@@ -2389,50 +2443,13 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
 // Today card and Stats' header. Both paths call the same onOpenLiveRecorder
 // prop lifted to GKTrainerApp, so whichever one is used, the other
 // immediately sees it as "in progress" too — one shared source of truth.
-function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, onSaveAdHoc, onSaveMatch, onSaveOpponentRoster, onOpenLiveRecorder, onOpenHelp }) {
-  const [showLiveMatchForm, setShowLiveMatchForm] = useState(false);
-  const [teammateOptions, setTeammateOptions] = useState([]);
+// Deliberately thin now — creating anything and starting the clock moved
+// out to beginTrainingRecording/beginMatchRecording in GKTrainerApp, only
+// reachable via the setup screens below (TrainingSetupScreen/
+// MatchSetupScreen). This tab just offers "resume what's already running"
+// or "open a setup screen," never starts a recording itself.
+function RecordTab({ plans, adHocSessions, matches, onOpenLiveRecorder, onOpenTrainingSetup, onOpenMatchSetup, onOpenHelp }) {
   const active = findActiveRecording({ plans, adHocSessions, matches });
-
-  // Who can currently record matches for -- i.e. an accepted connection
-  // where the OTHER side has granted the current user recording rights.
-  // Fetched once on mount; connections change rarely enough that Record
-  // tab doesn't need to react live to Profile's Teammates card.
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        const rows = await getMyConnections();
-        const { canRecordFor } = summarizeConnections(rows, user?.id);
-        setTeammateOptions(canRecordFor.map((c) => partnerOf(c, user?.id)).map((p) => ({ ownerId: p.id, email: p.email })));
-      } catch (e) {
-        setTeammateOptions([]);
-      }
-    })();
-  }, []);
-
-  function startTraining() {
-    const next = nextSuggestedSession(plans);
-    if (next) {
-      const nextPlan = {
-        ...next.plan,
-        weeks: next.plan.weeks.map((ww) => ww.weekId === next.week.weekId
-          ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === next.session.sessionId ? { ...ss, recording: startRecording() } : ss)) }
-          : ww),
-      };
-      onSave(nextPlan);
-      onOpenLiveRecorder({ kind: "plan", planId: next.plan.id, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus });
-    } else {
-      const session = {
-        id: uid(), title: "", notes: "", date: new Date().toISOString().slice(0, 10),
-        exerciseIds: [], doneExerciseIds: [], exerciseLogs: {},
-        completed: false, rpe: null, note: "", completedAt: null,
-        recording: startRecording(),
-      };
-      onSaveAdHoc(session);
-      onOpenLiveRecorder({ kind: "adhoc", sessionId: session.id });
-    }
-  }
 
   const resumeLabel = !active ? null
     : active.kind === "match"
@@ -2456,16 +2473,16 @@ function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, o
         </button>
       ) : (
         <div className="space-y-3">
-          <button onClick={startTraining} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
+          <button onClick={onOpenTrainingSetup} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
             <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#0E8388" }}>
               <span className="w-3 h-3 rounded-full" style={{ background: "#fff" }} />
             </div>
             <div>
               <div className="font-bold text-sm" style={{ color: "#12213A" }}>Record training session</div>
-              <div className="text-xs text-gray-500 mt-0.5">Starts your next planned session, or a one-off if nothing's due</div>
+              <div className="text-xs text-gray-500 mt-0.5">Your next planned session, or a one-off if nothing's due</div>
             </div>
           </button>
-          <button onClick={() => setShowLiveMatchForm(true)} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
+          <button onClick={onOpenMatchSetup} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
             <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#0E8388" }}>
               <span className="w-3 h-3 rounded-full" style={{ background: "#fff" }} />
             </div>
@@ -2476,26 +2493,233 @@ function RecordTab({ plans, adHocSessions, matches, season, opponents, onSave, o
           </button>
         </div>
       )}
+    </div>
+  );
+}
 
-      {showLiveMatchForm && (
-        <MatchFormModal
-          season={season}
-          matches={matches}
+// Shown before ANY new recording starts — nothing is created or persisted
+// here, only once "Start" is tapped (beginTrainingRecording in
+// GKTrainerApp). Mirrors nextSuggestedSession's own auto-pick logic (the
+// same "next due, else one-off" choice Plans' Today card already makes) so
+// there's one rule for "what session is this," not two that could disagree.
+function TrainingSetupScreen({ plans, exercises, onStart, onClose }) {
+  const next = nextSuggestedSession(plans);
+  const [title, setTitle] = useState("");
+  const [focus, setFocus] = useState(next?.session.focus || "");
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
+          <ArrowLeft size={14} /> Cancel
+        </button>
+        <div className="text-lg font-black text-white">Set up your session</div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {next ? (
+          <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>Next up</div>
+            <div className="text-sm font-bold mb-0.5" style={{ color: "#12213A" }}>
+              {next.plan.name} — Week {next.week.weekNumber}, Session {next.session.sessionNumber}
+            </div>
+            {next.week.focus && <div className="text-[11px] text-gray-500 mb-2">{next.week.focus}</div>}
+            <div className="space-y-0.5 mb-3">
+              {next.session.exercises.slice(0, 4).map((entry) => {
+                const ex = exercises.find((e) => e.id === entry.exerciseId);
+                if (!ex) return null;
+                return <div key={entry.entryId} className="text-[11px] text-gray-600">{ex.name}</div>;
+              })}
+              {next.session.exercises.length === 0 && <div className="text-[11px] text-gray-400">No exercises added yet</div>}
+            </div>
+            <Field label="Focus for this session (optional)">
+              <input className="input" placeholder="e.g. early first step" value={focus} onChange={(e) => setFocus(e.target.value)} />
+            </Field>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>New one-off session</div>
+            <p className="text-xs text-gray-500 mb-3">Nothing's due from your blocks right now, so this'll be a standalone session.</p>
+            <Field label="Title (optional)">
+              <input className="input" placeholder="e.g. Extra reflex work" value={title} onChange={(e) => setTitle(e.target.value)} />
+            </Field>
+          </div>
+        )}
+      </div>
+
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button
+          onClick={() => onStart({ title, focus })}
+          className="w-full py-3.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2"
+          style={{ background: "#0E8388" }}
+        >
+          <span className="w-2.5 h-2.5 rounded-full" style={{ background: "#fff" }} /> Start
+        </button>
+      </div>
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+    </div>
+  );
+}
+
+// Same "nothing created until Start" rule as TrainingSetupScreen, plus this
+// is where the teammate connection for THIS match gets made per the
+// invite-code mechanism (migration 0005) — not a separate settings flow.
+// Redeeming a code here only ever creates/reuses a connection; it can
+// never grant recording permission by itself, since that's the teammate's
+// own explicit, separate, owner-controlled grant (set_recording_permission
+// can only be called by the account being recorded for) — a code entered
+// here either matches an already-permitted teammate (immediately usable)
+// or starts a request that still needs the other side's own action.
+function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, onStart, onClose }) {
+  const [form, setForm] = useState({ opponent: "", competition: "", season, videoUrl: "" });
+  const [rosterOpen, setRosterOpen] = useState(false);
+  const [teammateOptions, setTeammateOptions] = useState([]);
+  const [selectedTeammate, setSelectedTeammate] = useState(null);
+  const [myCode, setMyCode] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [redeemInput, setRedeemInput] = useState("");
+  const [redeemStatus, setRedeemStatus] = useState(null);
+  const [redeeming, setRedeeming] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        const [code, rows] = await Promise.all([getMyInviteCode(), getMyConnections()]);
+        setMyCode(code);
+        const { canRecordFor } = summarizeConnections(rows, user?.id);
+        setTeammateOptions(canRecordFor.map((c) => partnerOf(c, user?.id)).map((p) => ({ ownerId: p.id, email: p.email })));
+      } catch (e) {
+        setTeammateOptions([]);
+      }
+    })();
+  }, []);
+
+  function copyMyCode() {
+    if (!myCode) return;
+    navigator.clipboard?.writeText(myCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  async function handleRedeem() {
+    if (!redeemInput.trim()) return;
+    setRedeeming(true);
+    setRedeemStatus(null);
+    try {
+      const conn = await redeemInviteCode(redeemInput);
+      setRedeemInput("");
+      setRedeemStatus(
+        conn.status === "accepted"
+          ? { ok: true, message: "Already connected — once they've granted you recording permission from their own Profile, they'll appear above." }
+          : { ok: true, message: "Request sent. They'll need to accept and grant recording permission from their own phone before the switch appears here." }
+      );
+    } catch (e) {
+      setRedeemStatus({
+        ok: false,
+        message: e.message?.includes("not found") ? "That code doesn't match any account." : e.message?.includes("yourself") ? "That's your own code." : "Couldn't send that request.",
+      });
+    } finally {
+      setRedeeming(false);
+    }
+  }
+
+  const valid = form.opponent.trim();
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
+          <ArrowLeft size={14} /> Cancel
+        </button>
+        <div className="text-lg font-black text-white">Set up the match</div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+        <Field label="Opponent">
+          <input className="input" placeholder="e.g. North Shore" value={form.opponent} onChange={(e) => setForm({ ...form, opponent: e.target.value })} />
+          <OpponentHistoryNote matches={matches} opponent={form.opponent} roster={findOpponentRoster(opponents, form.opponent)?.roster} onTap={() => setRosterOpen(true)} />
+        </Field>
+        <Field label="Competition (optional)">
+          <input className="input" placeholder="Optional" value={form.competition} onChange={(e) => setForm({ ...form, competition: e.target.value })} />
+        </Field>
+        <Field label="Discipline">
+          <div className="flex gap-2">
+            {["Winter", "Summer"].map((s) => (
+              <button key={s} onClick={() => setForm({ ...form, season: s })} className="flex-1 py-2 rounded-lg text-xs font-bold border flex items-center justify-center gap-1.5" style={form.season === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
+                {s === "Winter" ? <Snowflake size={13} /> : <Waves size={13} />}
+                {s === "Winter" ? "Indoor" : "Beach"}
+              </button>
+            ))}
+          </div>
+        </Field>
+
+        <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-sm font-bold mb-1.5" style={{ color: "#12213A" }}>Recording with a teammate?</div>
+          {teammateOptions.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-2.5">
+              <button
+                onClick={() => setSelectedTeammate(null)}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
+                style={!selectedTeammate ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+              >
+                Just me
+              </button>
+              {teammateOptions.map((t) => (
+                <button
+                  key={t.ownerId}
+                  onClick={() => setSelectedTeammate(t)}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
+                  style={selectedTeammate?.ownerId === t.ownerId ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                >
+                  {t.email}
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-gray-500 mb-2">Not connected yet? Share your code, or enter theirs — mutual consent still applies, so they'll need to accept and grant you recording permission from their own phone.</p>
+          <button onClick={copyMyCode} className="w-full text-left rounded-md px-2.5 py-2 text-xs font-mono font-bold tracking-wide mb-1" style={{ background: "#F3F2ED", color: "#12213A" }}>
+            {myCode || "…"}
+          </button>
+          {copied && <div className="text-[10px] font-semibold mb-1.5" style={{ color: "#0E8388" }}>Copied</div>}
+          <div className="flex gap-2 mt-1.5">
+            <input
+              className="flex-1 rounded-md px-2.5 py-2 text-sm border font-mono uppercase"
+              style={{ borderColor: "#DAD7CC" }}
+              placeholder="Their code"
+              value={redeemInput}
+              onChange={(e) => { setRedeemInput(e.target.value); setRedeemStatus(null); }}
+              maxLength={12}
+            />
+            <button disabled={!redeemInput.trim() || redeeming} onClick={handleRedeem} className="px-3.5 rounded-md text-xs font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+              Connect
+            </button>
+          </div>
+          {redeemStatus && <div className="text-[11px] font-semibold mt-1.5" style={{ color: redeemStatus.ok ? "#0E8388" : "#C1483B" }}>{redeemStatus.message}</div>}
+        </div>
+      </div>
+
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button
+          disabled={!valid}
+          onClick={() => onStart({ date: new Date().toISOString().slice(0, 10), opponent: form.opponent.trim(), competition: form.competition.trim(), result: "", season: form.season, videoUrl: form.videoUrl }, selectedTeammate)}
+          className="w-full py-3.5 rounded-lg text-sm font-bold text-white disabled:opacity-40 flex items-center justify-center gap-2"
+          style={{ background: "#0E8388" }}
+        >
+          <span className="w-2.5 h-2.5 rounded-full" style={{ background: "#fff" }} /> Start
+        </button>
+      </div>
+
+      {rosterOpen && (
+        <OpponentDetailModal
+          opponentName={form.opponent}
           opponents={opponents}
-          onSaveOpponentRoster={onSaveOpponentRoster}
-          teammateOptions={teammateOptions}
-          title="Start a live match"
-          submitLabel="Start recording"
-          onClose={() => setShowLiveMatchForm(false)}
-          onSave={(m) => {
-            const { teammateOwnerId, teammateEmail, ...matchFields } = m;
-            const withRecording = { ...matchFields, recording: startRecording() };
-            onSaveMatch(withRecording);
-            setShowLiveMatchForm(false);
-            onOpenLiveRecorder({ kind: "match", matchId: withRecording.id, teammateOwnerId: teammateOwnerId || null, teammateEmail: teammateEmail || null });
-          }}
+          matches={matches}
+          onClose={() => setRosterOpen(false)}
+          onSaveRoster={(roster) => onSaveOpponentRoster?.(form.opponent, roster)}
         />
       )}
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
     </div>
   );
 }
@@ -3833,14 +4057,6 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
 
   return (
     <div>
-      <div className="px-4 pt-4 flex justify-end">
-        <button onClick={() => setShowUploads(true)} className="flex items-center gap-1 text-[11px] font-semibold" style={{ color: "#0E8388" }}>
-          <Paperclip size={12} /> Uploads
-        </button>
-      </div>
-      <NotificationsSection profile={profile} onSaveProfile={onSaveProfile} />
-      <TeammatesSection />
-      <CoachSharingSection profile={profile} onSaveProfile={onSaveProfile} />
       <KipOnboarding
         profile={profile}
         onSave={onSaveProfile}
@@ -3850,6 +4066,13 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
         plans={plans}
         onApplyPtPlan={onApplyPtPlan}
       />
+      <div className="px-4 pt-1 flex justify-end">
+        <button onClick={() => setShowUploads(true)} className="flex items-center gap-1 text-[11px] font-semibold" style={{ color: "#0E8388" }}>
+          <Paperclip size={12} /> Uploads
+        </button>
+      </div>
+      <NotificationsSection profile={profile} onSaveProfile={onSaveProfile} />
+      <TeammatesSection />
     </div>
   );
 }
@@ -4201,12 +4424,11 @@ function CoachSharingSection({ profile, onSaveProfile }) {
   }
 
   return (
-    <div className="px-4 pt-4">
-      <div className="bg-white rounded-lg border p-3.5 mb-4" style={{ borderColor: "#DAD7CC" }}>
-        <div className="text-sm font-bold mb-1 flex items-center gap-1.5" style={{ color: "#12213A" }}>
-          <Mail size={14} color="#0E8388" /> Share with coach
-        </div>
-        <p className="text-xs text-gray-500 mb-2">Send your coach a periodic email digest — they don't need a Keepr account, it's just an email. You choose what's in it.</p>
+    <div>
+      <div className="text-sm font-bold mb-1 flex items-center gap-1.5" style={{ color: "#12213A" }}>
+        <Mail size={14} color="#0E8388" /> Share with coach
+      </div>
+      <p className="text-xs text-gray-500 mb-3">Send your coach a periodic email digest — they don't need a Keepr account, it's just an email. You choose what's in it.</p>
 
         {!coachEmail ? (
           <div className="flex gap-2">
@@ -4272,7 +4494,6 @@ function CoachSharingSection({ profile, onSaveProfile }) {
             )}
           </>
         )}
-      </div>
     </div>
   );
 }
@@ -5333,22 +5554,37 @@ function GoalGrid({ zones, onZoneTap, size = "normal" }) {
 
 function ShotLogModal({ season, zone, videoUrl, roster = [], onClose, onSave }) {
   const [outcome, setOutcome] = useState(null);
-  // undefined = type not chosen yet; null = "logged without a type" — both
-  // distinct from "no roster step needed", which is decided by roster.length.
+  // undefined = not chosen yet; null = "logged without one" — both distinct
+  // from "this step doesn't apply" (season/roster gating below).
   const [shotType, setShotType] = useState(undefined);
+  const [position, setPosition] = useState(undefined);
   const [timestamp, setTimestamp] = useState("");
   const types = shotTypesFor(season);
   const videoTimestamp = timestamp.trim() || null;
+  const isIndoor = season !== "Summer";
 
   function chooseType(t) {
-    if (roster.length > 0) setShotType(t);
-    else onSave({ zone, outcome, shotType: t, videoTimestamp, shooterNumber: null });
+    setShotType(t);
+    // Beach has no position axis at all (3-a-side, no LW/LB/CB/RB/RW/Pivot
+    // formation) — same immediate-finalize-if-no-roster shortcut as before.
+    // Indoor always continues on to the position step next.
+    if (!isIndoor && roster.length === 0) {
+      onSave({ zone, outcome, shotType: t, videoTimestamp, shooterNumber: null, position: null });
+    }
+  }
+  function choosePosition(p) {
+    setPosition(p);
+    if (roster.length === 0) {
+      onSave({ zone, outcome, shotType, videoTimestamp, shooterNumber: null, position: p });
+    }
   }
   function finalize(shooterNumber) {
-    onSave({ zone, outcome, shotType, videoTimestamp, shooterNumber: shooterNumber || null });
+    onSave({ zone, outcome, shotType, videoTimestamp, shooterNumber: shooterNumber || null, position: isIndoor ? position : null });
   }
 
-  const showShooterStep = outcome && shotType !== undefined && roster.length > 0;
+  const showPositionStep = outcome && shotType !== undefined && isIndoor && position === undefined;
+  const positionSatisfied = !isIndoor || position !== undefined;
+  const showShooterStep = outcome && shotType !== undefined && positionSatisfied && roster.length > 0;
 
   return (
     <Modal onClose={onClose}>
@@ -5397,6 +5633,26 @@ function ShotLogModal({ season, zone, videoUrl, roster = [], onClose, onSave }) 
               Log without a type
             </button>
           )}
+        </>
+      )}
+      {showPositionStep && (
+        <>
+          <p className="text-xs text-gray-500 mb-3">Which position took it? (optional)</p>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {POSITIONS.map((p) => (
+              <button
+                key={p}
+                onClick={() => choosePosition(p)}
+                className="px-3 py-2 rounded-lg text-xs font-bold border"
+                style={{ borderColor: "#DAD7CC" }}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => choosePosition(null)} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>
+            Skip
+          </button>
         </>
       )}
       {showShooterStep && (
@@ -5669,8 +5925,8 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
   const totalPoints = (match.shots || []).reduce((a, s) => a + (s.outcome === "Goal" ? pointsForShot(match.season, s.shotType) : 0), 0);
   const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
 
-  function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber }) {
-    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null };
+  function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber, position }) {
+    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null, position: position || null };
     onSave({ ...match, shots: [...(match.shots || []), shot] });
     setZoneTap(null);
   }
@@ -5728,6 +5984,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
                   <span className="text-gray-500">{ZONE_LABELS[s.zone]}</span>
                   {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
                   {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
+                  {s.position && <span className="text-gray-400">· {s.position}</span>}
                   {s.outcome === "Goal" && match.season === "Summer" && (
                     <span className="text-[10px] font-black" style={{ color: "#8A8779" }}>+{pointsForShot(match.season, s.shotType)}</span>
                   )}
@@ -5848,8 +6105,8 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   const totalSaves = (activeMatch.shots || []).filter((s) => s.outcome === "Save").length;
   const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
 
-  function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber }) {
-    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null };
+  function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber, position }) {
+    const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null, position: position || null };
     const nextShots = [...(activeMatch.shots || []), shot];
     if (activeRecorder === "teammate" && teammateMatch) {
       patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
@@ -5945,6 +6202,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
                     <span className="text-gray-500">{ZONE_LABELS[s.zone]}</span>
                     {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
                   {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
+                  {s.position && <span className="text-gray-400">· {s.position}</span>}
                   </div>
                   <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
                 </div>
@@ -6011,14 +6269,14 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, reports = [], onReportGenerated, onOpenHelp }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, profile, onSaveProfile, reports = [], onReportGenerated, onOpenHelp, onOpenMatchSetup }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [showForm, setShowForm] = useState(false);
-  const [showLiveForm, setShowLiveForm] = useState(false);
   const [filter, setFilter] = useState(season);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportError, setReportError] = useState(null);
   const [openReportId, setOpenReportId] = useState(null);
+  const [showCoachShare, setShowCoachShare] = useState(false);
 
   async function handleGenerateReport() {
     setGeneratingReport(true);
@@ -6047,6 +6305,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
 
   const agg = aggregateMatchStats(matches, filter);
   const shotTypeAgg = filter !== "Winter" ? aggregateShotTypeStats(matches.filter((m) => filter === "All" || m.season === filter)) : {};
+  const positionAgg = filter !== "Summer" ? aggregatePositionStats(matches.filter((m) => filter === "All" || m.season === filter)) : {};
   const hasData = agg.totalSaves + agg.totalGoals > 0;
   const overallSavePct = hasData ? Math.round((agg.totalSaves / (agg.totalSaves + agg.totalGoals)) * 100) : 0;
   const zoneEntries = Object.entries(agg.zones).filter(([, z]) => z.saves + z.goals > 0);
@@ -6064,7 +6323,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => (inProgressMatch ? onOpenLiveRecorder({ kind: "match", matchId: inProgressMatch.id }) : setShowLiveForm(true))}
+            onClick={() => (inProgressMatch ? onOpenLiveRecorder({ kind: "match", matchId: inProgressMatch.id }) : onOpenMatchSetup())}
             className="px-3 py-2 rounded-lg text-xs font-bold text-white flex items-center gap-1.5"
             style={{ background: "#0E8388" }}
           >
@@ -6089,9 +6348,14 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
           <div className="text-sm font-bold flex items-center gap-1.5" style={{ color: "#12213A" }}>
             <BarChart3 size={14} color="#0E8388" /> Reports
           </div>
-          <button onClick={handleGenerateReport} disabled={generatingReport} className="text-[11px] font-bold disabled:opacity-40" style={{ color: "#0E8388" }}>
-            {generatingReport ? "Generating…" : "+ Generate report"}
-          </button>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setShowCoachShare(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#8A8779" }}>
+              <Mail size={12} /> Coach
+            </button>
+            <button onClick={handleGenerateReport} disabled={generatingReport} className="text-[11px] font-bold disabled:opacity-40" style={{ color: "#0E8388" }}>
+              {generatingReport ? "Generating…" : "+ Generate report"}
+            </button>
+          </div>
         </div>
         {reportError && <div className="text-[11px] mb-1" style={{ color: "#C1483B" }}>{reportError}</div>}
         {reports.length === 0 ? (
@@ -6100,13 +6364,22 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
           <div className="space-y-1.5">
             {[...reports].reverse().slice(0, 4).map((r) => (
               <button key={r.id} onClick={() => setOpenReportId(r.id)} className="w-full text-left flex items-center justify-between rounded-md px-2.5 py-2 text-xs" style={{ background: "#F3F2ED" }}>
-                <span className="font-semibold" style={{ color: "#12213A" }}>{formatShortDate(r.createdAt.slice(0, 10))} report</span>
+                <span className="font-semibold flex items-center gap-1.5" style={{ color: "#12213A" }}>
+                  {formatShortDate(r.createdAt.slice(0, 10))} report
+                  {r.sentToCoach && <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#fff", color: "#8A8779" }}>Sent to coach</span>}
+                </span>
                 <ChevronRight size={14} color="#8A8779" />
               </button>
             ))}
           </div>
         )}
       </div>
+
+      {showCoachShare && (
+        <Modal onClose={() => setShowCoachShare(false)}>
+          <CoachSharingSection profile={profile} onSaveProfile={onSaveProfile} />
+        </Modal>
+      )}
 
       {!hasData ? (
         <div className="text-center py-10">
@@ -6159,6 +6432,26 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
                 })}
               </div>
               <p className="text-[10px] text-gray-400 mt-1.5">Beach: regular goals are 1 point; spin/360, in-flight, specialist/GK and 6m penalty goals are 2 points.</p>
+            </div>
+          )}
+
+          {filter !== "Summer" && Object.keys(positionAgg).length > 0 && (
+            <div className="mb-4">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Save % by position</div>
+              <div className="space-y-1.5">
+                {POSITIONS.filter((p) => positionAgg[p]).map((p) => {
+                  const v = positionAgg[p];
+                  const total = v.saves + v.goals;
+                  const pct = total > 0 ? Math.round((v.saves / total) * 100) : 0;
+                  return (
+                    <div key={p} className="bg-white rounded-lg border px-3 py-2 flex items-center justify-between" style={{ borderColor: "#DAD7CC" }}>
+                      <div className="text-xs font-bold">{p}</div>
+                      <div className="text-xs text-gray-500">{pct}% saved ({total})</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1.5">Only shots tagged with a position while logging show up here — it's optional.</p>
             </div>
           )}
 
@@ -6219,43 +6512,34 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
         />
       )}
 
-      {showLiveForm && (
-        <MatchFormModal
-          season={season}
-          matches={matches}
-          opponents={opponents}
-          onSaveOpponentRoster={onSaveOpponentRoster}
-          title="Start a live match"
-          submitLabel="Start recording"
-          onClose={() => setShowLiveForm(false)}
-          onSave={(m) => {
-            const withRecording = { ...m, recording: startRecording() };
-            onSave(withRecording);
-            setShowLiveForm(false);
-            onOpenLiveRecorder({ kind: "match", matchId: withRecording.id });
-          }}
-        />
-      )}
-
       <WorkoutStats plans={plans} exercises={exercises} adHocSessions={adHocSessions} />
 
       {openReportId && (() => {
         const report = reports.find((r) => r.id === openReportId);
         if (!report) return null;
-        return <ReportDetailModal report={report} onClose={() => setOpenReportId(null)} />;
+        return <ReportDetailModal report={report} profile={profile} onSaveProfile={onSaveProfile} onClose={() => setOpenReportId(null)} />;
       })()}
     </div>
   );
 }
 
-function ReportDetailModal({ report, onClose }) {
+function ReportDetailModal({ report, profile, onSaveProfile, onClose }) {
   const d = report.data;
+  const [showCoachShare, setShowCoachShare] = useState(false);
   return (
     <Modal onClose={onClose}>
-      <div className="flex items-center gap-1.5 mb-1">
-        <BarChart3 size={15} color="#0E8388" />
-        <h3 className="text-base font-black" style={{ color: "#12213A" }}>{formatShortDate(report.createdAt.slice(0, 10))} report</h3>
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-1.5">
+          <BarChart3 size={15} color="#0E8388" />
+          <h3 className="text-base font-black" style={{ color: "#12213A" }}>{formatShortDate(report.createdAt.slice(0, 10))} report</h3>
+        </div>
+        <button onClick={() => setShowCoachShare(true)} className="text-[11px] font-bold flex items-center gap-1 shrink-0" style={{ color: "#0E8388" }}>
+          <Mail size={12} /> Share with coach
+        </button>
       </div>
+      {report.sentToCoach && (
+        <div className="text-[11px] font-semibold mb-2" style={{ color: "#8A8779" }}>Sent to {report.coachEmail}</div>
+      )}
       <p className="text-sm text-gray-700 leading-relaxed mb-4 whitespace-pre-wrap">{report.narrative}</p>
 
       <div className="grid grid-cols-2 gap-2 mb-3">
@@ -6303,6 +6587,12 @@ function ReportDetailModal({ report, onClose }) {
             ))}
           </div>
         </div>
+      )}
+
+      {showCoachShare && (
+        <Modal onClose={() => setShowCoachShare(false)}>
+          <CoachSharingSection profile={profile} onSaveProfile={onSaveProfile} />
+        </Modal>
       )}
     </Modal>
   );

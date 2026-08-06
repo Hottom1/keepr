@@ -106,6 +106,26 @@ export function aggregateShotTypeStats(matches) {
   return map;
 }
 
+// The six standard outfield attacking positions in indoor handball, left to
+// right across the court as a keeper would actually face them. A distinct
+// axis from shotType (origin/range — Wing/9m/6m/etc) and zone (where in the
+// GOAL the shot landed) — position is which court lane the shooter played
+// from. Additive, optional, indoor-only: beach handball's 3-a-side format
+// has no equivalent formation, so this is never asked for a Summer match.
+export const POSITIONS = ["LW", "LB", "CB", "RB", "RW", "Pivot"];
+
+export function aggregatePositionStats(matches) {
+  const map = {};
+  matches.filter((m) => m.season === "Winter").forEach((m) => {
+    (m.shots || []).forEach((s) => {
+      if (!s.position) return;
+      if (!map[s.position]) map[s.position] = { saves: 0, goals: 0 };
+      if (s.outcome === "Save") map[s.position].saves++; else map[s.position].goals++;
+    });
+  });
+  return map;
+}
+
 // Shared key for anything grouped by opponent name — matches, opponent
 // records, and the roster below all key off this exact normalization so a
 // team is recognized as "the same opponent" regardless of casing/whitespace.
