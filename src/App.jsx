@@ -289,7 +289,7 @@ export default function GKTrainerApp() {
   // allowlist must filter plans by blockType, not just spread this array.
   const [plans, setPlans] = useState([]);
   const [season, setSeason] = useState("Winter");
-  const [tab, setTab] = useState("library");
+  const [tab, setTab] = useState("plans");
   const [saveError, setSaveError] = useState(false);
   // profile.niggles (incl. rehabLog and files) is injury/rehab data. If a
   // public-profile sharing feature is ever built, it must construct an
@@ -882,7 +882,10 @@ export default function GKTrainerApp() {
 
       <BottomNav tab={tab} setTab={setTab} hasKipAlert={hasKipAlert} />
 
-      {!helpTarget && <HelpWidget onOpen={() => openHelp()} />}
+      {/* Hidden on the Kip tab — the launcher bubble sits right where the chat's
+          own message input lives, crowding/overlapping it on that one screen.
+          Still available from every other tab as normal. */}
+      {!helpTarget && tab !== "kip" && <HelpWidget onOpen={() => openHelp()} />}
       {helpTarget && (
         <HelpPanel
           initialArticleId={helpTarget.articleId}
@@ -1246,22 +1249,34 @@ function Library({ exercises, season, onAdd, onDelete, profile }) {
         </button>
       </div>
 
-      <div className="flex gap-1.5 mb-2 -mx-4 px-4 overflow-x-auto pb-1">
+      <div className="flex gap-1.5 mb-3">
         <Chip active={seasonFilter === "current"} onClick={() => setSeasonFilter(seasonFilter === "current" ? "all" : "current")} accent="#12213A">
           {seasonFilter === "current" ? `${season} relevant` : "All seasons"}
         </Chip>
-        {TYPES.map((t) => (
-          <Chip key={t} active={type === t} onClick={() => setType(type === t ? null : t)}>
-            {t}
-          </Chip>
-        ))}
       </div>
-      <div className="flex gap-1.5 mb-4 -mx-4 px-4 overflow-x-auto pb-1">
-        {CATS.map((c) => (
-          <Chip key={c} active={cat === c} onClick={() => setCat(cat === c ? null : c)} accent="#3B5BA5">
-            {c}
-          </Chip>
-        ))}
+      <div className="grid grid-cols-2 gap-2 mb-4">
+        <select
+          value={type || ""}
+          onChange={(e) => setType(e.target.value || null)}
+          className="bg-white rounded-lg px-3 py-2 border text-xs font-bold"
+          style={{ borderColor: "#DAD7CC", color: "#12213A" }}
+        >
+          <option value="">All types</option>
+          {TYPES.map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        <select
+          value={cat || ""}
+          onChange={(e) => setCat(e.target.value || null)}
+          className="bg-white rounded-lg px-3 py-2 border text-xs font-bold"
+          style={{ borderColor: "#DAD7CC", color: "#12213A" }}
+        >
+          <option value="">All categories</option>
+          {CATS.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
       </div>
 
       <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
@@ -4550,7 +4565,7 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, pl
     <div className="px-4 pt-4 pb-8">
       <div className="flex items-center gap-2 mb-1">
         <Sparkles size={18} color="#0E8388" />
-        <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Meet Kip</h2>
+        <h2 className="text-lg font-black" style={{ color: "#12213A" }}>Update Kip Profile</h2>
       </div>
       <p className="text-xs text-gray-500 mb-4">
         A few questions so Kip's advice is actually about you, not generic. Takes a minute.
