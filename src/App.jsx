@@ -340,6 +340,10 @@ export default function GKTrainerApp() {
   // {kind:"training"} or {kind:"match"} open. Resuming an in-progress
   // recording never touches this, only starting fresh does.
   const [pendingSetup, setPendingSetup] = useState(null);
+  // Shown right after Finish, replacing the live recorder overlay instead
+  // of just closing it — the post-recording review/report chain. null
+  // closed; shape depends on kind, see the three onFinish handlers below.
+  const [postRecordingFlow, setPostRecordingFlow] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -676,6 +680,7 @@ export default function GKTrainerApp() {
             onDiscardCalendarSuggestion={discardCalendarSuggestion}
             onOpenHelp={openHelp}
             onOpenTrainingSetup={() => setPendingSetup({ kind: "training" })}
+            onOpenKip={onOpenKip}
           />
         )}
         {tab === "record" && (
@@ -779,6 +784,7 @@ export default function GKTrainerApp() {
               };
               savePlan(next);
               setActiveLiveTarget(null);
+              setPostRecordingFlow({ kind: "plan", planId: livePlan.id, weekId: activeLiveTarget.weekId, sessionId: activeLiveTarget.sessionId });
             }}
             onExit={() => setActiveLiveTarget(null)}
             onDelete={() => {
@@ -816,6 +822,7 @@ export default function GKTrainerApp() {
               const { recording, ...rest } = liveSession;
               saveAdHocSession({ ...rest, completed: true, rpe, note, durationMinutes, completedAt: new Date().toISOString(), exerciseLogs });
               setActiveLiveTarget(null);
+              setPostRecordingFlow({ kind: "adhoc", sessionId: liveSession.id });
             }}
             onExit={() => setActiveLiveTarget(null)}
             onDelete={() => {
@@ -845,14 +852,26 @@ export default function GKTrainerApp() {
             onUpdatePatch={(patch) => saveMatch({ ...liveMatch, ...patch })}
             onFinish={(patch, teammateMatchId) => {
               const { recording, ...rest } = liveMatch;
-              saveMatch({ ...rest, ...patch });
+              const finishedMatch = { ...rest, ...patch };
+              saveMatch(finishedMatch);
+              setActiveLiveTarget(null);
               if (activeLiveTarget.teammateOwnerId && teammateMatchId) {
                 const teammatePatch = { recording: null };
                 if ("competition" in patch) teammatePatch.competition = patch.competition;
                 if ("result" in patch) teammatePatch.result = patch.result;
-                patchTeammateMatch(activeLiveTarget.teammateOwnerId, teammateMatchId, teammatePatch).catch(() => {});
+                patchTeammateMatch(activeLiveTarget.teammateOwnerId, teammateMatchId, teammatePatch)
+                  .then((updatedTeammateMatch) => {
+                    setPostRecordingFlow({ kind: "match", matchId: finishedMatch.id, teammateOwnerId: activeLiveTarget.teammateOwnerId, teammateMatch: updatedTeammateMatch });
+                  })
+                  .catch(() => {
+                    // Their side failed to finalize (e.g. permission revoked
+                    // mid-match) -- still chain into review for the caller's
+                    // own match, just without a teammate step.
+                    setPostRecordingFlow({ kind: "match", matchId: finishedMatch.id, teammateOwnerId: null, teammateMatch: null });
+                  });
+              } else {
+                setPostRecordingFlow({ kind: "match", matchId: finishedMatch.id, teammateOwnerId: null, teammateMatch: null });
               }
-              setActiveLiveTarget(null);
             }}
             onExit={() => setActiveLiveTarget(null)}
             onDelete={(teammateMatchId) => {
@@ -862,6 +881,81 @@ export default function GKTrainerApp() {
               }
               setActiveLiveTarget(null);
             }}
+          />
+        );
+      })()}
+
+      {postRecordingFlow?.kind === "plan" && (() => {
+        const plan = plans.find((p) => p.id === postRecordingFlow.planId);
+        const week = plan?.weeks.find((w) => w.weekId === postRecordingFlow.weekId);
+        const session = week?.sessions.find((s) => s.sessionId === postRecordingFlow.sessionId);
+        if (!session) return null;
+        return (
+          <PostRecordingFlow
+            kind="plan"
+            session={session}
+            exercises={allExercises}
+            profile={profile}
+            onSaveProfile={saveProfile}
+            plans={plans}
+            season={season}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            onUpdateSession={(patch) => {
+              const next = {
+                ...plan,
+                weeks: plan.weeks.map((ww) => ww.weekId === week.weekId
+                  ? { ...ww, sessions: ww.sessions.map((ss) => (ss.sessionId === session.sessionId ? { ...ss, ...patch } : ss)) }
+                  : ww),
+              };
+              savePlan(next);
+            }}
+            onReportGenerated={addReportAndNotify}
+            onClose={() => setPostRecordingFlow(null)}
+          />
+        );
+      })()}
+
+      {postRecordingFlow?.kind === "adhoc" && (() => {
+        const session = adHocSessions.find((s) => s.id === postRecordingFlow.sessionId);
+        if (!session) return null;
+        return (
+          <PostRecordingFlow
+            kind="adhoc"
+            session={session}
+            exercises={allExercises}
+            profile={profile}
+            onSaveProfile={saveProfile}
+            plans={plans}
+            season={season}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            onUpdateSession={(patch) => saveAdHocSession({ ...session, ...patch })}
+            onReportGenerated={addReportAndNotify}
+            onClose={() => setPostRecordingFlow(null)}
+          />
+        );
+      })()}
+
+      {postRecordingFlow?.kind === "match" && (() => {
+        const match = matches.find((m) => m.id === postRecordingFlow.matchId);
+        if (!match) return null;
+        return (
+          <PostRecordingFlow
+            kind="match"
+            match={match}
+            teammateOwnerId={postRecordingFlow.teammateOwnerId}
+            teammateMatch={postRecordingFlow.teammateMatch}
+            exercises={allExercises}
+            profile={profile}
+            onSaveProfile={saveProfile}
+            plans={plans}
+            season={season}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            onSaveMatch={saveMatch}
+            onReportGenerated={addReportAndNotify}
+            onClose={() => setPostRecordingFlow(null)}
           />
         );
       })()}
@@ -1980,7 +2074,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2029,6 +2123,24 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
   const streak = weeklyStreak(plans);
   const next = nextSuggestedSession(plans);
   const trend = rpeTrend(plans);
+
+  // Today view (per DECISIONS.md) — pulls together data three other tabs
+  // already compute, no new conditions or data sources. Same
+  // computeKipAlerts/describeAlertItem the Kip tab's badge and proactive
+  // check-in already use, just read here for a plain, non-LLM one-liner
+  // instead of triggering a second narrated version of the same thing.
+  // Warnings surface ahead of positive items (PRs, badges) since they're
+  // the more actionable half of what computeKipAlerts returns.
+  const todayAlertItems = computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises });
+  const todayAlert = todayAlertItems.find((it) => it.kind === "warning") || todayAlertItems[0] || null;
+
+  // "Soon" is deliberately narrow (14 days) — this is a glance-ahead, not
+  // the full fixture list Stats/Calendar already show.
+  const todayDateKey = new Date().toISOString().slice(0, 10);
+  const soonCutoff = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const upcomingMatch = [...matches]
+    .filter((m) => m.date >= todayDateKey && m.date <= soonCutoff && !m.recording)
+    .sort((a, b) => new Date(a.date) - new Date(b.date))[0] || null;
 
   return (
     <div className="px-4 pt-4 pb-6 space-y-3">
@@ -2099,6 +2211,21 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
         </div>
       )}
 
+      {todayAlert && (
+        <div className="rounded-lg border-2 p-3 flex items-start gap-2.5" style={{ borderColor: todayAlert.kind === "warning" ? "#E2984B" : "#0E8388", background: "#fff" }}>
+          {todayAlert.kind === "warning" ? <AlertTriangle size={15} color="#E2984B" className="shrink-0 mt-0.5" /> : <Sparkles size={15} color="#0E8388" className="shrink-0 mt-0.5" />}
+          <div className="flex-1 min-w-0">
+            <div className="text-[10px] font-bold uppercase tracking-wide mb-0.5" style={{ color: todayAlert.kind === "warning" ? "#E2984B" : "#0E8388" }}>
+              {todayAlert.kind === "warning" ? "Worth knowing" : "Good news"}
+            </div>
+            <div className="text-xs text-gray-700 leading-snug">{describeAlertItem(todayAlert)}</div>
+          </div>
+          <button onClick={onOpenKip} className="text-[11px] font-bold shrink-0" style={{ color: "#0E8388" }}>
+            Open Kip
+          </button>
+        </div>
+      )}
+
       {next ? (
         <div className="rounded-lg border-2 p-3" style={{ borderColor: "#0E8388", background: "#fff" }}>
           <div className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>Today</div>
@@ -2154,6 +2281,17 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
           <CheckCircle2 size={18} color="#0E8388" className="mx-auto mb-1" />
           <div className="text-xs font-bold" style={{ color: "#12213A" }}>All caught up</div>
           <div className="text-[11px] text-gray-500">Every session in your plans is logged.</div>
+        </div>
+      )}
+
+      {upcomingMatch && (
+        <div className="rounded-lg border p-3 flex items-center justify-between" style={{ borderColor: "#DAD7CC", background: "#fff" }}>
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wide mb-0.5" style={{ color: "#8A8779" }}>Coming up</div>
+            <div className="text-sm font-bold" style={{ color: "#12213A" }}>vs {upcomingMatch.opponent}</div>
+            <div className="text-[11px] text-gray-500">{formatShortDate(upcomingMatch.date)}{upcomingMatch.competition ? ` · ${upcomingMatch.competition}` : ""}</div>
+          </div>
+          <SeasonBadge season={upcomingMatch.season} />
         </div>
       )}
 
@@ -3279,10 +3417,17 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
   );
 }
 
-function LogSessionModal({ onClose, onSave, focus, gymEntries = [] }) {
-  const [rpe, setRpe] = useState(null);
-  const [note, setNote] = useState("");
-  const [gymLogs, setGymLogs] = useState(() => Object.fromEntries(gymEntries.map((g) => [g.entryId, []])));
+// initialRpe/initialNote/initialGymLogs default to the original blank-form
+// behavior — only the post-recording review step's "Edit" action passes
+// real values, to reopen this exact same modal pre-filled for a correction
+// rather than a fresh log.
+function LogSessionModal({ onClose, onSave, focus, gymEntries = [], initialRpe = null, initialNote = "", initialGymLogs = null }) {
+  const [rpe, setRpe] = useState(initialRpe);
+  const [note, setNote] = useState(initialNote);
+  const [gymLogs, setGymLogs] = useState(() => {
+    if (initialGymLogs) return Object.fromEntries(gymEntries.map((g) => [g.entryId, initialGymLogs[g.entryId] || []]));
+    return Object.fromEntries(gymEntries.map((g) => [g.entryId, []]));
+  });
 
   function cleanedGymLogs() {
     return Object.fromEntries(
@@ -6295,6 +6440,354 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
         />
       )}
     </div>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+/* Post-recording flow                                                */
+/* Chains what used to be a dead end (Finish -> straight back to      */
+/* whichever tab was underneath) into: review what was just logged ->  */
+/* review the teammate's portion if one was recorded for -> offer a    */
+/* report. Every step is already-saved, already-editable data being    */
+/* glanced at, not a new "nothing persisted until you confirm" gate --  */
+/* the immediate-persistence-while-recording principle this whole      */
+/* Record feature was built on doesn't change here. See DECISIONS.md.  */
+/* ---------------------------------------------------------------- */
+
+function MatchReviewStep({ match, onSaveMatch, onContinue, onClose }) {
+  const zones = emptyZoneMap();
+  (match.shots || []).forEach((s) => {
+    if (!zones[s.zone]) return;
+    if (s.outcome === "Save") zones[s.zone].saves++; else zones[s.zone].goals++;
+  });
+  const totalShots = (match.shots || []).length;
+  const totalSaves = (match.shots || []).filter((s) => s.outcome === "Save").length;
+  const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
+
+  function removeShot(id) {
+    onSaveMatch({ ...match, shots: (match.shots || []).filter((s) => s.id !== id) });
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Match finished — review</div>
+          <div className="text-lg font-black text-white">vs {match.opponent}</div>
+          <div className="text-xs text-white/70 mt-0.5">{match.date}{match.result ? ` · ${match.result}` : ""}</div>
+        </div>
+        <button onClick={onClose} className="text-[11px] font-semibold text-white/60 shrink-0">Skip</button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-lg font-black" style={{ color: "#0E8388" }}>{savePct}%</div>
+            <div className="text-[10px] text-gray-500 font-semibold uppercase">Save rate</div>
+          </div>
+          <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-lg font-black" style={{ color: "#12213A" }}>{totalSaves}/{totalShots}</div>
+            <div className="text-[10px] text-gray-500 font-semibold uppercase">Saves</div>
+          </div>
+        </div>
+        <GoalGrid zones={zones} />
+        {totalShots > 0 ? (
+          <div className="mt-4">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Logged shots — tap X to remove any that are wrong</div>
+            <div className="space-y-1.5">
+              {[...(match.shots || [])].reverse().map((s) => (
+                <div key={s.id} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-bold" style={{ color: s.outcome === "Save" ? "#0E8388" : "#C1483B" }}>{s.outcome}</span>
+                    <span className="text-gray-500">{ZONE_LABELS[s.zone]}</span>
+                    {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
+                    {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
+                    {s.position && <span className="text-gray-400">· {s.position}</span>}
+                  </div>
+                  <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="text-xs text-gray-400 mt-3">No shots logged.</div>
+        )}
+      </div>
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button onClick={onContinue} className="w-full py-3.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Looks good — continue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TrainingReviewStep({ session, exercises, onUpdateSession, onContinue, onClose }) {
+  const [editing, setEditing] = useState(false);
+  const gymEntries = (session.exerciseIds || [])
+    .map((id) => exercises.find((e) => e.id === id))
+    .filter((ex) => ex && ex.type === "Gym")
+    .map((ex) => ({ entryId: ex.id, exerciseName: ex.name }));
+  const exerciseLogs = session.exerciseLogs || {};
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Session finished — review</div>
+          <div className="text-lg font-black text-white">{session.title || "Training session"}</div>
+        </div>
+        <button onClick={onClose} className="text-[11px] font-semibold text-white/60 shrink-0">Skip</button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        <div className="bg-white rounded-lg border p-3 mb-3" style={{ borderColor: "#DAD7CC" }}>
+          <div className="flex items-center gap-1.5 text-xs font-bold mb-1" style={{ color: "#0E8388" }}>
+            <CheckCircle2 size={14} /> Completed{session.rpe ? ` — RPE ${session.rpe}` : ""}
+          </div>
+          {session.note && <div className="text-xs text-gray-500 italic">"{session.note}"</div>}
+          {!session.rpe && !session.note && <div className="text-xs text-gray-400">No RPE or note logged.</div>}
+        </div>
+        {gymEntries.length > 0 && (
+          <div className="mb-3">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Sets logged</div>
+            {gymEntries.map((g) => {
+              const sets = exerciseLogs[g.entryId];
+              return (
+                <div key={g.entryId} className="bg-white rounded-md px-2.5 py-1.5 border text-xs mb-1.5" style={{ borderColor: "#DAD7CC" }}>
+                  <div className="font-bold" style={{ color: "#12213A" }}>{g.exerciseName}</div>
+                  {sets && sets.length > 0 ? (
+                    <div className="text-[11px] text-gray-500">{sets.map((s) => `${s.weight ?? "–"}kg×${s.reps ?? "–"}`).join(", ")}</div>
+                  ) : (
+                    <div className="text-[11px] text-gray-400">Nothing logged</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <button onClick={() => setEditing(true)} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC", color: "#12213A" }}>
+          Edit RPE / note / sets
+        </button>
+      </div>
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button onClick={onContinue} className="w-full py-3.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Looks good — continue
+        </button>
+      </div>
+      {editing && (
+        <LogSessionModal
+          gymEntries={gymEntries}
+          initialRpe={session.rpe}
+          initialNote={session.note || ""}
+          initialGymLogs={exerciseLogs}
+          onClose={() => setEditing(false)}
+          onSave={({ rpe, note, gymLogs }) => {
+            onUpdateSession({ rpe, note, exerciseLogs: { ...exerciseLogs, ...gymLogs } });
+            setEditing(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// The teammate's match lives in THEIR account — this screen only exists
+// because the recorder already holds the final object in memory (handed
+// forward from the patchTeammateMatch call that finalized it) and already
+// has permission-gated write access via that same RPC. It's a convenience
+// gut-check for whoever just recorded, not a replacement for the owner's
+// own review — they can still freely correct their match later from their
+// own account regardless of what happens (or doesn't) on this screen.
+function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMatch, onContinue, onClose }) {
+  const [error, setError] = useState(null);
+  const zones = emptyZoneMap();
+  (teammateMatch.shots || []).forEach((s) => {
+    if (!zones[s.zone]) return;
+    if (s.outcome === "Save") zones[s.zone].saves++; else zones[s.zone].goals++;
+  });
+  const totalShots = (teammateMatch.shots || []).length;
+  const totalSaves = (teammateMatch.shots || []).filter((s) => s.outcome === "Save").length;
+  const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
+
+  async function removeShot(id) {
+    const nextShots = (teammateMatch.shots || []).filter((s) => s.id !== id);
+    try {
+      const updated = await patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots });
+      onUpdateTeammateMatch(updated);
+    } catch (e) {
+      setError("Couldn't update their match just now — they can still fix it themselves later.");
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Recorded for {teammateMatch.recordedByEmail ? "them" : "your teammate"}</div>
+          <div className="text-lg font-black text-white">vs {teammateMatch.opponent}</div>
+        </div>
+        <button onClick={onClose} className="text-[11px] font-semibold text-white/60 shrink-0">Skip</button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        <p className="text-xs text-gray-500 mb-3">Quick check that their portion looks right too — they can still review and correct it themselves later from their own account either way.</p>
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-lg font-black" style={{ color: "#0E8388" }}>{savePct}%</div>
+            <div className="text-[10px] text-gray-500 font-semibold uppercase">Save rate</div>
+          </div>
+          <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
+            <div className="text-lg font-black" style={{ color: "#12213A" }}>{totalSaves}/{totalShots}</div>
+            <div className="text-[10px] text-gray-500 font-semibold uppercase">Saves</div>
+          </div>
+        </div>
+        {error && <div className="text-[11px] font-semibold mb-2" style={{ color: "#C1483B" }}>{error}</div>}
+        {totalShots > 0 ? (
+          <div className="space-y-1.5">
+            {[...(teammateMatch.shots || [])].reverse().map((s) => (
+              <div key={s.id} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-bold" style={{ color: s.outcome === "Save" ? "#0E8388" : "#C1483B" }}>{s.outcome}</span>
+                  <span className="text-gray-500">{ZONE_LABELS[s.zone]}</span>
+                  {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
+                  {s.position && <span className="text-gray-400">· {s.position}</span>}
+                </div>
+                <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-xs text-gray-400">No shots logged for them.</div>
+        )}
+      </div>
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button onClick={onContinue} className="w-full py-3.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Looks good — continue
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Reuses generateKipReport/addReportAndNotify and CoachSharingSection
+// wholesale — no new report scope, no new coach-sharing logic. Reports
+// stay whole-history summaries exactly as Stats' own "+ Generate report"
+// already produces; this is just a second, better-timed entry point into
+// the same feature, not a narrower "this match only" report type.
+function ReportPromptStep({ profile, onSaveProfile, plans, season, matches, exercises, adHocSessions, onReportGenerated, onDone }) {
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState(null);
+  const [report, setReport] = useState(null);
+  const [showCoachShare, setShowCoachShare] = useState(false);
+
+  async function handleGenerate() {
+    setGenerating(true);
+    setError(null);
+    try {
+      const r = await generateKipReport({ profile, plans, season, matches, exercises, adHocSessions });
+      onReportGenerated(r);
+      setReport(r);
+    } catch (e) {
+      setError("Couldn't generate a report just now — try again from Stats later.");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">All logged</div>
+        <div className="text-lg font-black text-white">Nice work</div>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {!report ? (
+          <div className="bg-white rounded-lg border p-4 text-center" style={{ borderColor: "#DAD7CC" }}>
+            <BarChart3 size={24} color="#0E8388" className="mx-auto mb-2" />
+            <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Want a progress report?</div>
+            <p className="text-xs text-gray-500 mb-3">A real written summary pulled from your logged data — training consistency, match trends, rep progress.</p>
+            {error && <div className="text-[11px] mb-2" style={{ color: "#C1483B" }}>{error}</div>}
+            <button onClick={handleGenerate} disabled={generating} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+              {generating ? "Generating…" : "Generate report"}
+            </button>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg border p-4" style={{ borderColor: "#DAD7CC" }}>
+            <div className="flex items-center gap-1.5 mb-2">
+              <BarChart3 size={15} color="#0E8388" />
+              <div className="text-sm font-bold" style={{ color: "#12213A" }}>{formatShortDate(report.createdAt.slice(0, 10))} report</div>
+            </div>
+            <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap mb-3">{report.narrative}</p>
+            <button onClick={() => setShowCoachShare(true)} className="w-full py-2.5 rounded-lg text-sm font-bold border flex items-center justify-center gap-1.5" style={{ borderColor: "#DAD7CC", color: "#0E8388" }}>
+              <Mail size={13} /> Share with coach
+            </button>
+          </div>
+        )}
+      </div>
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button onClick={onDone} className="w-full py-3.5 rounded-lg text-sm font-bold text-white" style={{ background: "#12213A" }}>
+          {report ? "Done" : "Not now"}
+        </button>
+      </div>
+      {showCoachShare && (
+        <Modal onClose={() => setShowCoachShare(false)}>
+          <CoachSharingSection profile={profile} onSaveProfile={onSaveProfile} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Orchestrator — review (match or training) -> teammate review (match with
+// a connected teammate only) -> report prompt -> done. Every step but the
+// last is a quick glance-and-continue over already-saved data; only the
+// report step is explicitly skippable-with-no-action, per the brief.
+function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatch, exercises, profile, onSaveProfile, plans, season, matches, adHocSessions, onUpdateSession, onSaveMatch, onReportGenerated, onClose }) {
+  const [step, setStep] = useState("review");
+  const [liveTeammateMatch, setLiveTeammateMatch] = useState(teammateMatch);
+  const hasTeammateStep = kind === "match" && !!teammateOwnerId && !!liveTeammateMatch;
+
+  if (step === "review") {
+    return kind === "match" ? (
+      <MatchReviewStep
+        match={match}
+        onSaveMatch={onSaveMatch}
+        onContinue={() => setStep(hasTeammateStep ? "teammate" : "report")}
+        onClose={onClose}
+      />
+    ) : (
+      <TrainingReviewStep
+        session={session}
+        exercises={exercises}
+        onUpdateSession={onUpdateSession}
+        onContinue={() => setStep("report")}
+        onClose={onClose}
+      />
+    );
+  }
+
+  if (step === "teammate" && hasTeammateStep) {
+    return (
+      <TeammateReviewStep
+        teammateMatch={liveTeammateMatch}
+        teammateOwnerId={teammateOwnerId}
+        onUpdateTeammateMatch={setLiveTeammateMatch}
+        onContinue={() => setStep("report")}
+        onClose={onClose}
+      />
+    );
+  }
+
+  return (
+    <ReportPromptStep
+      profile={profile}
+      onSaveProfile={onSaveProfile}
+      plans={plans}
+      season={season}
+      matches={matches}
+      exercises={exercises}
+      adHocSessions={adHocSessions}
+      onReportGenerated={onReportGenerated}
+      onDone={onClose}
+    />
   );
 }
 
