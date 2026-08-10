@@ -874,11 +874,13 @@ export default function GKTrainerApp() {
               }
             }}
             onExit={() => setActiveLiveTarget(null)}
-            onDelete={(teammateMatchId) => {
+            onDelete={() => {
+              // The teammate's linked match (if any) is already deleted, or
+              // explicitly skipped by the keeper, by the time this fires --
+              // LiveMatchRecorder's own delete-confirm flow owns that call
+              // now, since it's the only place that can show a retry on
+              // failure before the recorder unmounts.
               deleteMatch(liveMatch.id);
-              if (activeLiveTarget.teammateOwnerId && teammateMatchId) {
-                deleteTeammateMatch(activeLiveTarget.teammateOwnerId, teammateMatchId).catch(() => {});
-              }
               setActiveLiveTarget(null);
             }}
           />
@@ -4335,7 +4337,10 @@ function TeammatesSection() {
   const [redeeming, setRedeeming] = useState(false);
   const [copied, setCopied] = useState(false);
   const [busyId, setBusyId] = useState(null);
+  const [actionError, setActionError] = useState(null); // { id, message }
   const [confirmRevokeId, setConfirmRevokeId] = useState(null);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerateError, setRegenerateError] = useState(null);
 
   async function refresh() {
     const { data: { user } } = await supabase.auth.getUser();
@@ -4348,8 +4353,16 @@ function TeammatesSection() {
   useEffect(() => { refresh(); }, []);
 
   async function handleRegenerate() {
-    const code = await regenerateMyInviteCode();
-    setInviteCode(code);
+    setRegenerating(true);
+    setRegenerateError(null);
+    try {
+      const code = await regenerateMyInviteCode();
+      setInviteCode(code);
+    } catch (e) {
+      setRegenerateError(e.message || "Couldn't generate a new code — try again.");
+    } finally {
+      setRegenerating(false);
+    }
   }
 
   function copyCode() {
@@ -4376,9 +4389,12 @@ function TeammatesSection() {
 
   async function withBusy(id, fn) {
     setBusyId(id);
+    setActionError(null);
     try {
       await fn();
       await refresh();
+    } catch (e) {
+      setActionError({ id, message: e.message || "That didn't go through — try again." });
     } finally {
       setBusyId(null);
     }
@@ -4399,11 +4415,12 @@ function TeammatesSection() {
           <button onClick={copyCode} className="flex-1 text-left rounded-md px-2.5 py-2 text-sm font-mono font-bold tracking-wide" style={{ background: "#F3F2ED", color: "#12213A" }}>
             {inviteCode || "…"}
           </button>
-          <button onClick={handleRegenerate} className="px-3 rounded-md text-[11px] font-semibold border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
-            New code
+          <button onClick={handleRegenerate} disabled={regenerating} className="px-3 rounded-md text-[11px] font-semibold border disabled:opacity-40" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
+            {regenerating ? "…" : "New code"}
           </button>
         </div>
         {copied && <div className="text-[10px] font-semibold mb-2" style={{ color: "#0E8388" }}>Copied</div>}
+        {regenerateError && <div className="text-[11px] font-semibold mb-2" style={{ color: "#C1483B" }}>{regenerateError}</div>}
 
         <div className="mt-3 pt-3 border-t" style={{ borderColor: "#DAD7CC" }}>
           <div className="text-xs font-bold mb-1.5" style={{ color: "#12213A" }}>Have a teammate's code?</div>
@@ -4434,26 +4451,29 @@ function TeammatesSection() {
           <div className="text-sm font-bold mb-2" style={{ color: "#12213A" }}>Requests</div>
           <div className="space-y-2">
             {incomingPending.map((c) => (
-              <div key={c.id} className="flex items-center justify-between rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
-                <div className="text-xs font-semibold break-all pr-2" style={{ color: "#12213A" }}>{c.requester_email || "A keeper"}</div>
-                <div className="flex gap-1.5 shrink-0">
-                  <button
-                    disabled={busyId === c.id}
-                    onClick={() => withBusy(c.id, () => acceptConnection(c.id))}
-                    className="px-2.5 py-1 rounded-md text-[11px] font-bold text-white disabled:opacity-40"
-                    style={{ background: "#0E8388" }}
-                  >
-                    Accept
-                  </button>
-                  <button
-                    disabled={busyId === c.id}
-                    onClick={() => withBusy(c.id, () => declineConnection(c.id))}
-                    className="px-2.5 py-1 rounded-md text-[11px] font-bold disabled:opacity-40"
-                    style={{ color: "#8A8779" }}
-                  >
-                    Decline
-                  </button>
+              <div key={c.id} className="rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold break-all pr-2" style={{ color: "#12213A" }}>{c.requester_email || "A keeper"}</div>
+                  <div className="flex gap-1.5 shrink-0">
+                    <button
+                      disabled={busyId === c.id}
+                      onClick={() => withBusy(c.id, () => acceptConnection(c.id))}
+                      className="px-2.5 py-1 rounded-md text-[11px] font-bold text-white disabled:opacity-40"
+                      style={{ background: "#0E8388" }}
+                    >
+                      Accept
+                    </button>
+                    <button
+                      disabled={busyId === c.id}
+                      onClick={() => withBusy(c.id, () => declineConnection(c.id))}
+                      className="px-2.5 py-1 rounded-md text-[11px] font-bold disabled:opacity-40"
+                      style={{ color: "#8A8779" }}
+                    >
+                      Decline
+                    </button>
+                  </div>
                 </div>
+                {actionError?.id === c.id && <div className="text-[11px] font-semibold mt-1" style={{ color: "#C1483B" }}>{actionError.message}</div>}
               </div>
             ))}
           </div>
@@ -4467,16 +4487,19 @@ function TeammatesSection() {
             {outgoingPending.map((c) => {
               const partner = partnerOf(c, viewerId);
               return (
-                <div key={c.id} className="flex items-center justify-between rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
-                  <div className="text-xs pr-2" style={{ color: "#8A8779" }}>Waiting for {partner.email || "them"} to accept</div>
-                  <button
-                    disabled={busyId === c.id}
-                    onClick={() => withBusy(c.id, () => revokeConnection(c.id))}
-                    className="text-[11px] font-semibold shrink-0"
-                    style={{ color: "#C1483B" }}
-                  >
-                    Cancel
-                  </button>
+                <div key={c.id} className="rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs pr-2" style={{ color: "#8A8779" }}>Waiting for {partner.email || "them"} to accept</div>
+                    <button
+                      disabled={busyId === c.id}
+                      onClick={() => withBusy(c.id, () => revokeConnection(c.id))}
+                      className="text-[11px] font-semibold shrink-0"
+                      style={{ color: "#C1483B" }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {actionError?.id === c.id && <div className="text-[11px] font-semibold mt-1" style={{ color: "#C1483B" }}>{actionError.message}</div>}
                 </div>
               );
             })}
@@ -4505,6 +4528,7 @@ function TeammatesSection() {
                     <span style={{ color: "#12213A" }}>Let them record matches for me</span>
                     {iGrant ? <CheckCircle2 size={14} color="#0E8388" /> : <Circle size={14} color="#DAD7CC" />}
                   </button>
+                  {actionError?.id === c.id && <div className="text-[11px] font-semibold mt-1" style={{ color: "#C1483B" }}>{actionError.message}</div>}
                 </div>
               );
             })}
@@ -6243,6 +6267,18 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   const [activeRecorder, setActiveRecorder] = useState("self");
   const [teammateMatch, setTeammateMatch] = useState(null);
   const [teammateError, setTeammateError] = useState(null);
+  // In-flight lock for a teammate shot write -- while true, zone taps,
+  // remove-shot, the Me/teammate switch, Finish, and Delete are all
+  // disabled. Without this, a quick double-tap during teammate-mode
+  // recording can fire a second write before the first's response lands,
+  // and since both compute their patch from the same pre-write local
+  // `teammateMatch.shots`, the second write silently overwrites the first
+  // -- one of the two shots vanishes, last write wins. Serializing writes
+  // this way (rather than trying to merge concurrent patches) is also what
+  // closes the race, not just what shows a spinner.
+  const [teammateWritePending, setTeammateWritePending] = useState(false);
+  const [deleteStatus, setDeleteStatus] = useState("idle"); // idle | deleting | teammate-failed
+  const [deleteError, setDeleteError] = useState(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -6279,13 +6315,27 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   const totalSaves = (activeMatch.shots || []).filter((s) => s.outcome === "Save").length;
   const savePct = totalShots > 0 ? Math.round((totalSaves / totalShots) * 100) : 0;
 
+  // Reverting to "self" on a failed teammate write is deliberate, not just
+  // a fallback -- if their write failed, staying in "teammate" mode would
+  // let the keeper keep tapping shots that also silently fail. But a silent
+  // revert is exactly what the audit flagged: the keeper has to actually
+  // notice the switch moved, or they think they're still tracking their
+  // teammate when they're not. The banner spells out what happened and
+  // what to do, not just that something went wrong.
+  function teammateWriteFailed(e, action) {
+    setTeammateWritePending(false);
+    setTeammateError(`Switched back to recording for yourself -- ${action} (${e.message || "connection issue"}). Switch back to ${teammateEmail} once you're ready to try again.`);
+    setActiveRecorder("self");
+  }
+
   function logShot({ zone, outcome, shotType, videoTimestamp, shooterNumber, position }) {
     const shot = { id: uid(), zone, outcome, shotType: shotType || null, videoTimestamp: videoTimestamp || null, shooterNumber: shooterNumber || null, position: position || null };
     const nextShots = [...(activeMatch.shots || []), shot];
     if (activeRecorder === "teammate" && teammateMatch) {
+      setTeammateWritePending(true);
       patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
-        .then((updated) => setTeammateMatch(updated))
-        .catch((e) => { setTeammateError(e.message || "Couldn't save that shot to their account"); setActiveRecorder("self"); });
+        .then((updated) => { setTeammateMatch(updated); setTeammateWritePending(false); })
+        .catch((e) => teammateWriteFailed(e, `${teammateEmail}'s last shot didn't save`));
     } else {
       onUpdatePatch({ shots: nextShots });
     }
@@ -6294,9 +6344,10 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   function removeShot(id) {
     const nextShots = (activeMatch.shots || []).filter((s) => s.id !== id);
     if (activeRecorder === "teammate" && teammateMatch) {
+      setTeammateWritePending(true);
       patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
-        .then((updated) => setTeammateMatch(updated))
-        .catch((e) => { setTeammateError(e.message || "Couldn't update their match"); setActiveRecorder("self"); });
+        .then((updated) => { setTeammateMatch(updated); setTeammateWritePending(false); })
+        .catch((e) => teammateWriteFailed(e, "couldn't update their match"));
     } else {
       onUpdatePatch({ shots: nextShots });
     }
@@ -6305,6 +6356,29 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   function finish() {
     if (!match.competition && !match.result) setWrappingUp(true);
     else onFinish({ durationMinutes: recordingElapsedMinutes(recording) }, teammateMatch?.id);
+  }
+
+  // Deleting the teammate's linked match is attempted (and can be retried)
+  // *before* the keeper's own match is deleted and the recorder closes --
+  // once this component unmounts there's nowhere left to show a failure or
+  // offer a retry, which is exactly how this used to fail silently
+  // (`.catch(() => {})`, own match gone, their orphaned copy nobody knew
+  // about). `skipTeammate` is the explicit "delete just my copy" escape
+  // hatch, not a default -- it only fires from a button the keeper sees
+  // after a real failure, so it's always an informed choice, not a silent one.
+  async function confirmDelete(skipTeammate) {
+    if (teammateMatch && !skipTeammate) {
+      setDeleteStatus("deleting");
+      setDeleteError(null);
+      try {
+        await deleteTeammateMatch(teammateOwnerId, teammateMatch.id);
+      } catch (e) {
+        setDeleteError(e.message || "Couldn't delete their match");
+        setDeleteStatus("teammate-failed");
+        return;
+      }
+    }
+    onDelete();
   }
 
   return (
@@ -6317,7 +6391,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
           <button onClick={() => setShowKipPanel(true)} className="flex items-center gap-1 text-xs font-semibold" style={{ color: "#0E8388" }}>
             <Sparkles size={13} /> Ask Kip
           </button>
-          <button onClick={() => setConfirmDeleting(true)} className="ml-auto flex items-center gap-1 text-xs font-semibold text-white/70">
+          <button onClick={() => setConfirmDeleting(true)} disabled={teammateWritePending} className="ml-auto flex items-center gap-1 text-xs font-semibold text-white/70 disabled:opacity-40">
             <Trash2 size={13} /> Delete
           </button>
         </div>
@@ -6342,14 +6416,15 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
           <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Now recording for</div>
           <div className="flex rounded-lg border p-1" style={{ borderColor: "#DAD7CC" }}>
             <button
+              disabled={teammateWritePending}
               onClick={() => setActiveRecorder("self")}
-              className="flex-1 py-1.5 rounded-md text-xs font-bold"
+              className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
               style={activeRecorder === "self" ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
             >
               Me
             </button>
             <button
-              disabled={!teammateMatch}
+              disabled={!teammateMatch || teammateWritePending}
               onClick={() => setActiveRecorder("teammate")}
               className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
               style={activeRecorder === "teammate" ? { background: "#0E8388", color: "#fff" } : { color: "#8A8779" }}
@@ -6357,13 +6432,20 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
               {teammateMatch ? teammateEmail : "Setting up…"}
             </button>
           </div>
-          {teammateError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{teammateError}</div>}
+          {teammateError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-2">
+              <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+              <div>{teammateError}</div>
+            </div>
+          )}
         </div>
       )}
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Tap a zone to log a shot</div>
-        <GoalGrid zones={zones} onZoneTap={(z) => setZoneTap(z)} />
+        <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">
+          {teammateWritePending ? "Saving shot…" : "Tap a zone to log a shot"}
+        </div>
+        <GoalGrid zones={zones} onZoneTap={teammateWritePending ? undefined : (z) => setZoneTap(z)} />
 
         {totalShots > 0 && (
           <div className="mt-4">
@@ -6378,7 +6460,9 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
                   {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
                   {s.position && <span className="text-gray-400">· {s.position}</span>}
                   </div>
-                  <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+                  <button onClick={() => removeShot(s.id)} disabled={teammateWritePending}>
+                    <X size={13} color={teammateWritePending ? "#DAD7CC" : "#C1483B"} />
+                  </button>
                 </div>
               ))}
             </div>
@@ -6394,7 +6478,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
         >
           {isPaused ? "Resume" : "Pause"}
         </button>
-        <button onClick={finish} className="flex-1 py-3 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+        <button onClick={finish} disabled={teammateWritePending} className="flex-1 py-3 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
           Finish
         </button>
       </div>
@@ -6418,16 +6502,41 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
       )}
 
       {confirmDeleting && (
-        <Modal onClose={() => setConfirmDeleting(false)}>
+        <Modal onClose={() => { if (deleteStatus !== "deleting") { setConfirmDeleting(false); setDeleteStatus("idle"); setDeleteError(null); } }}>
           <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Delete this match?</h3>
           <p className="text-sm text-gray-600 mb-4">
             This match was created for this recording, so deleting it removes it — and any shots already logged — completely.
             {teammateMatch ? ` Their linked match (and its shots) goes too.` : ""} This can't be undone.
           </p>
+          {deleteStatus === "teammate-failed" && (
+            <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
+              <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+              <div>{deleteError}. Their match record wasn't removed — try again, or delete just your own copy and let them know to remove theirs.</div>
+            </div>
+          )}
           <div className="flex gap-2">
-            <button onClick={() => setConfirmDeleting(false)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Keep it</button>
-            <button onClick={() => onDelete(teammateMatch?.id)} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Delete</button>
+            <button
+              onClick={() => { setConfirmDeleting(false); setDeleteStatus("idle"); setDeleteError(null); }}
+              disabled={deleteStatus === "deleting"}
+              className="flex-1 py-2.5 rounded-lg text-sm font-bold border disabled:opacity-40"
+              style={{ borderColor: "#DAD7CC" }}
+            >
+              Keep it
+            </button>
+            <button
+              onClick={() => confirmDelete(false)}
+              disabled={deleteStatus === "deleting"}
+              className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
+              style={{ background: "#C1483B" }}
+            >
+              {deleteStatus === "deleting" ? "Deleting…" : deleteStatus === "teammate-failed" ? "Try again" : "Delete"}
+            </button>
           </div>
+          {deleteStatus === "teammate-failed" && (
+            <button onClick={() => confirmDelete(true)} className="w-full mt-2 py-2 text-xs font-semibold" style={{ color: "#8A8779" }}>
+              Delete just my copy
+            </button>
+          )}
         </Modal>
       )}
 
@@ -6597,7 +6706,7 @@ function TrainingReviewStep({ session, exercises, onUpdateSession, onContinue, o
 // gut-check for whoever just recorded, not a replacement for the owner's
 // own review — they can still freely correct their match later from their
 // own account regardless of what happens (or doesn't) on this screen.
-function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMatch, onContinue, onClose }) {
+function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMatch, onContinue }) {
   const [error, setError] = useState(null);
   const zones = emptyZoneMap();
   (teammateMatch.shots || []).forEach((s) => {
@@ -6620,15 +6729,12 @@ function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMa
 
   return (
     <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
-      <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
-        <div>
-          <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Recorded for {teammateMatch.recordedByEmail ? "them" : "your teammate"}</div>
-          <div className="text-lg font-black text-white">vs {teammateMatch.opponent}</div>
-        </div>
-        <button onClick={onClose} className="text-[11px] font-semibold text-white/60 shrink-0">Skip</button>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Recorded for {teammateMatch.recordedByEmail ? "them" : "your teammate"}</div>
+        <div className="text-lg font-black text-white">vs {teammateMatch.opponent}</div>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        <p className="text-xs text-gray-500 mb-3">Quick check that their portion looks right too — they can still review and correct it themselves later from their own account either way.</p>
+        <p className="text-xs text-gray-500 mb-3">Check that their portion looks right before you finish — they can still review and correct it themselves later from their own account either way.</p>
         <div className="grid grid-cols-2 gap-2 mb-4">
           <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
             <div className="text-lg font-black" style={{ color: "#0E8388" }}>{savePct}%</div>
@@ -6771,7 +6877,6 @@ function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatc
         teammateOwnerId={teammateOwnerId}
         onUpdateTeammateMatch={setLiveTeammateMatch}
         onContinue={() => setStep("report")}
-        onClose={onClose}
       />
     );
   }
