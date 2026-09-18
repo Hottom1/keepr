@@ -681,6 +681,7 @@ export default function GKTrainerApp() {
             onOpenHelp={openHelp}
             onOpenTrainingSetup={() => setPendingSetup({ kind: "training" })}
             onOpenKip={onOpenKip}
+            onSessionLogged={setPostRecordingFlow}
           />
         )}
         {tab === "record" && (
@@ -1902,6 +1903,7 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
       {picker && (
         <ExercisePickerModal
           exercises={exercises}
+          season={p.season}
           onClose={() => setPicker(null)}
           onPick={(ex) => addExerciseToSession(picker.weekIdx, picker.sessionIdx, ex)}
         />
@@ -1910,9 +1912,21 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
   );
 }
 
-function ExercisePickerModal({ exercises, onClose, onPick }) {
+// `season` is optional -- only the PlanEditor call site (a season-tagged
+// block) passes it, so the other call sites (ad-hoc sessions, rehab log
+// entries, neither of which are season-tagged) are unaffected and keep
+// showing every exercise. When it is passed, this mirrors Library's own
+// browse-view filter and toggle exactly (same predicate, same "current vs
+// all seasons" escape hatch) rather than a second, stricter copy of it --
+// a block's own editor shouldn't be more restrictive than Library already is.
+function ExercisePickerModal({ exercises, season, onClose, onPick }) {
   const [q, setQ] = useState("");
-  const filtered = exercises.filter((e) => e.name.toLowerCase().includes(q.toLowerCase()));
+  const [seasonFilter, setSeasonFilter] = useState("current"); // current | all
+  const filtered = exercises.filter((e) => {
+    if (q && !e.name.toLowerCase().includes(q.toLowerCase())) return false;
+    if (season && seasonFilter === "current" && !(e.season === "Both" || e.season === season)) return false;
+    return true;
+  });
   return (
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-3">Add an exercise</h3>
@@ -1920,6 +1934,13 @@ function ExercisePickerModal({ exercises, onClose, onPick }) {
         <Search size={15} color="#8A8779" />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" className="flex-1 text-sm outline-none bg-transparent" />
       </div>
+      {season && (
+        <div className="mb-3">
+          <Chip active={seasonFilter === "current"} onClick={() => setSeasonFilter(seasonFilter === "current" ? "all" : "current")} accent="#12213A">
+            {seasonFilter === "current" ? `${season} relevant` : "All seasons"}
+          </Chip>
+        </div>
+      )}
       <div className="space-y-1.5 max-h-[50vh] overflow-y-auto">
         {filtered.map((ex) => (
           <button key={ex.id} onClick={() => onPick(ex)} className="w-full text-left bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
@@ -2076,7 +2097,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip }) {
+function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2530,6 +2551,11 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
               };
               onSave(next);
               setLogTarget(null);
+              // Same chain a live-recorded session gets (review, then the
+              // report prompt) -- logging after the fact is likely the more
+              // common path than live-recording every session, so it can't
+              // be the one that still dead-ends.
+              onSessionLogged({ kind: "plan", planId: plan.id, weekId, sessionId });
             }}
           />
         );
@@ -2569,6 +2595,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
           onClose={() => setAdHocLogTarget(null)}
           onSave={(session) => { onSaveAdHoc(session); setAdHocLogTarget(null); }}
           onDelete={() => { setConfirmDeleteAdHoc(adHocLogTarget.id); }}
+          onLogged={() => onSessionLogged({ kind: "adhoc", sessionId: adHocLogTarget.id })}
         />
       )}
 
@@ -3029,7 +3056,7 @@ function AdHocSessionFormModal({ exercises, initialDate, onClose, onSave }) {
   );
 }
 
-function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete }) {
+function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete, onLogged }) {
   const [logging, setLogging] = useState(false);
   const exerciseLogs = session.exerciseLogs || {};
   const gymEntries = (session.exerciseIds || [])
@@ -3091,6 +3118,10 @@ function AdHocSessionDetailModal({ session, exercises, onClose, onSave, onDelete
             if (gymLogs) Object.entries(gymLogs).forEach(([exerciseId, sets]) => { nextExerciseLogs[exerciseId] = sets; });
             onSave({ ...session, completed: true, rpe, note, completedAt: new Date().toISOString(), exerciseLogs: nextExerciseLogs });
             setLogging(false);
+            // Same post-recording chain (review, then the report prompt) a
+            // live-recorded ad-hoc session gets -- see the plan-session
+            // path above for why this can't stay a dead end.
+            onLogged();
           }}
         />
       )}
