@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import "./index.css";
+import ErrorBoundary from "./ErrorBoundary.jsx";
 import App from "./App.jsx";
 import { AuthProvider } from "./auth/AuthProvider.jsx";
 import ProtectedRoute from "./auth/ProtectedRoute.jsx";
@@ -15,6 +16,7 @@ import TermsOfService from "./marketing/TermsOfService.jsx";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
+    <ErrorBoundary variant="page">
     <BrowserRouter>
       <AuthProvider>
         <Routes>
@@ -37,5 +39,6 @@ ReactDOM.createRoot(document.getElementById("root")).render(
         </Routes>
       </AuthProvider>
     </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 );

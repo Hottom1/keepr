@@ -18,6 +18,7 @@ import {
 import { supabase } from "./lib/supabaseClient.js";
 import { HELP_CATEGORIES, searchHelpArticles, articlesByCategory, findHelpArticle } from "./lib/helpContent.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
 import { AngleNarrowingDiagram, ShadowOfBlockDiagram, WingShotGeometryDiagram, StraightShotCornerDiagram } from "./diagrams.jsx";
 import {
   CATS, GOALS, PHASES, ZONE_GRID, ZONE_LABELS, INDOOR_SHOT_TYPES, BEACH_SHOT_TYPES, BEACH_TWO_POINT_TYPES,
@@ -683,6 +684,7 @@ export default function GKTrainerApp() {
           item — that extra ~30px was showing up as a visible empty gap below
           Kip's input bar. */}
       <div className={`flex-1 overflow-y-auto max-w-md w-full mx-auto ${tab === "kip" ? "pb-[52px]" : "pb-20"}`}>
+        <ErrorBoundary variant="panel" resetKey={tab}>
         {tab === "library" && (
           <Library
             exercises={allExercises}
@@ -782,6 +784,7 @@ export default function GKTrainerApp() {
             onOpenProfile={() => setTab("profile")}
           />
         )}
+        </ErrorBoundary>
       </div>
 
       {activeLiveTarget?.kind === "plan" && (() => {
@@ -1627,7 +1630,7 @@ function Modal({ onClose, children }) {
         <div className="flex justify-end mb-1">
           <IconButton icon={X} size={16} label="Close" onClick={onClose} pad={12} className="bg-white" />
         </div>
-        {children}
+        <ErrorBoundary variant="modal" onClose={onClose}>{children}</ErrorBoundary>
       </div>
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
     </div>
@@ -7788,8 +7791,32 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
   );
 }
 
+// Two report shapes end up in the same `reports` array: the flat one from
+// Stats' own "Generate report" (computeReportData), and the nested,
+// category-filtered one a coach digest saves (computeCoachReportData:
+// matchStats / trainingLogs / attendance, any of which may be absent if
+// the keeper turned that category off). The detail modal used to read
+// only the flat shape, so opening a coach-digest report threw on
+// `undefined.length` and took the whole app to a white page.
+function normalizeReportData(raw) {
+  const d = raw || {};
+  const ms = d.matchStats || d;
+  const tl = d.trainingLogs || d;
+  return {
+    hasMatchStats: !!d.matchStats || "overallSavePct" in d,
+    hasTraining: !!d.trainingLogs || "completionRate" in d,
+    overallSavePct: ms.overallSavePct ?? null,
+    weakestZones: Array.isArray(ms.weakestZones) ? ms.weakestZones : [],
+    completionRate: tl.completionRate ?? null,
+    streakWeeks: tl.streakWeeks ?? null,
+    sessionsCompleted: tl.sessionsCompleted ?? null,
+    gymProgress: Array.isArray(tl.gymProgress) ? tl.gymProgress : [],
+    attendance: Array.isArray(d.attendance) ? d.attendance : [],
+  };
+}
+
 function ReportDetailModal({ report, profile, onSaveProfile, onClose }) {
-  const d = report.data;
+  const d = normalizeReportData(report.data);
   const [showCoachShare, setShowCoachShare] = useState(false);
   return (
     <Modal onClose={onClose}>
@@ -7807,24 +7834,32 @@ function ReportDetailModal({ report, profile, onSaveProfile, onClose }) {
       )}
       <p className="text-sm text-gray-700 leading-relaxed mb-4 whitespace-pre-wrap">{report.narrative}</p>
 
-      <div className="grid grid-cols-2 gap-2 mb-3">
-        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
-          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Save rate</div>
-          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.overallSavePct != null ? `${d.overallSavePct}%` : "No shots logged"}</div>
+      {(d.hasMatchStats || d.hasTraining) && (
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          {d.hasMatchStats && (
+            <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+              <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Save rate</div>
+              <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.overallSavePct != null ? `${d.overallSavePct}%` : "No shots logged"}</div>
+            </div>
+          )}
+          {d.hasTraining && (
+            <>
+              <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+                <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Session completion</div>
+                <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.completionRate != null ? `${d.completionRate}%` : "No plan yet"}</div>
+              </div>
+              <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+                <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Streak</div>
+                <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.streakWeeks != null ? `${d.streakWeeks} week${d.streakWeeks !== 1 ? "s" : ""}` : "—"}</div>
+              </div>
+              <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+                <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Sessions completed</div>
+                <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.sessionsCompleted ?? "—"}</div>
+              </div>
+            </>
+          )}
         </div>
-        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
-          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Session completion</div>
-          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.completionRate != null ? `${d.completionRate}%` : "No plan yet"}</div>
-        </div>
-        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
-          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Streak</div>
-          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.streakWeeks} week{d.streakWeeks !== 1 ? "s" : ""}</div>
-        </div>
-        <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
-          <div className="text-[10px] uppercase tracking-wide text-gray-400 font-bold">Sessions completed</div>
-          <div className="text-sm font-bold mt-0.5" style={{ color: "#12213A" }}>{d.sessionsCompleted}</div>
-        </div>
-      </div>
+      )}
 
       {d.weakestZones.length > 0 && (
         <div className="mb-3">
@@ -7848,6 +7883,20 @@ function ReportDetailModal({ report, profile, onSaveProfile, onClose }) {
               <div key={g.exercise} className="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
                 <span>{g.exercise}{g.prCount > 0 ? ` (${g.prCount} PR${g.prCount !== 1 ? "s" : ""})` : ""}</span>
                 <span className="font-bold" style={{ color: g.trend === "up" ? "#0E8388" : g.trend === "down" ? "#C1483B" : "#68655B" }}>{g.trend}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {d.attendance.length > 0 && (
+        <div className="mt-3">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Attendance</div>
+          <div className="space-y-1">
+            {d.attendance.map((a, i) => (
+              <div key={i} className="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
+                <span>{a.title}</span>
+                <span className="font-bold" style={{ color: "#12213A" }}>{a.date ? formatShortDate(a.date) : ""}</span>
               </div>
             ))}
           </div>
