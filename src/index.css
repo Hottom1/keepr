@@ -1,1 +1,16 @@
 @import "tailwindcss";
+
+/* Tailwind's default gray-400/500 fail WCAG contrast against this app's
+   paper background (#F3F2ED) and white cards -- gray-400 was ~2.4:1,
+   gray-500 ~4.3:1 on paper, both under the 4.5:1 text minimum. These are
+   used exclusively as text-gray-400/text-gray-500 throughout the app (no
+   background/border usage), so darkening the tokens here fixes every
+   occurrence at once rather than touching each of the 200+ call sites.
+   gray-500 reuses Tailwind's own gray-600 value (#4B5563, ~6.7:1 on
+   paper) rather than inventing a new one; gray-400 is a custom shade kept
+   lighter than the new gray-500 to preserve the two-tier distinction,
+   still ~5.3:1 on paper. */
+@theme {
+  --color-gray-400: #5B6472;
+  --color-gray-500: #4B5563;
+}

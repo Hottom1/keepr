@@ -228,6 +228,17 @@ export function parseTimestampToSeconds(ts) {
   return parts[0];
 }
 
+// Recognizes youtube.com/watch, youtube.com/embed, youtube.com/shorts, and
+// youtu.be links; anything else (Drive, a club's own host, etc.) returns
+// null and falls back to a plain external link -- the embedded player and
+// AI-detection tiers both key off this same single source of truth for
+// "is this actually a YouTube link."
+export function extractYouTubeId(url) {
+  if (!url) return null;
+  const m = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
 // Deep-links only for recognisable YouTube URLs (the one host with a reliable &t= param);
 // everything else falls back to the plain video link — no automatic detection, per the brief.
 export function videoLinkForShot(videoUrl, timestamp) {

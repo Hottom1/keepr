@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef, forwardRef, useImperativeHandle } from "react";
 import {
   Search, Plus, X, ChevronDown, ChevronRight, ChevronLeft, Dumbbell,
   Waves, Snowflake, Trash2, Check, Pencil, CalendarRange, Target,
@@ -9,7 +9,7 @@ import {
   UserPlus, Link2, Mail, HelpCircle,
 } from "lucide-react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
-import { loadUserData, saveUserData, uploadNiggleFile, uploadGeneralFile, getSignedNiggleFileUrl, deleteNiggleFile } from "./lib/storage.js";
+import { loadUserData, saveUserData, uploadNiggleFile, uploadGeneralFile, getSignedNiggleFileUrl, deleteNiggleFile, uploadMatchVideo, getSignedMatchVideoUrl, deleteMatchVideo } from "./lib/storage.js";
 import {
   getMyInviteCode, regenerateMyInviteCode, redeemInviteCode, acceptConnection, declineConnection,
   revokeConnection, setRecordingPermission, getMyConnections, summarizeConnections, partnerOf, myOutgoingGrant,
@@ -23,7 +23,7 @@ import {
   CATS, GOALS, PHASES, ZONE_GRID, ZONE_LABELS, INDOOR_SHOT_TYPES, BEACH_SHOT_TYPES, BEACH_TWO_POINT_TYPES,
   shotTypesFor, pointsForShot, emptyZoneMap, aggregateMatchStats, aggregateShotTypeStats, POSITIONS, aggregatePositionStats, normalizeOpponentName,
   opponentRecord, findOpponentRoster, upsertOpponentRoster, shooterStats, mostDangerousShooter, parseTimestampToSeconds,
-  videoLinkForShot, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
+  videoLinkForShot, extractYouTubeId, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
   excludedExerciseIdsForNiggles, NEAR_POST_ZONES, LOW_ZONES, EXERCISE_ZONE_MAP, EXERCISE_SHOTTYPE_MAP,
   MATCH_DATA_MIN_MATCHES, MATCH_DATA_MIN_SHOTS, TRAINING_LOG_MIN_SESSIONS, TRAINING_LOG_WINDOW_DAYS,
   weakestZoneSignal, weakestShotTypeSignal, categoryTrainingSignal, isPlateaued, exerciseGenWeight, makeWeightedPicker,
@@ -45,7 +45,13 @@ import {
 /* PAPER   #F3F2ED  – background                                     */
 /* TEAL    #0E8388  – primary accent (the goal-line / arc)           */
 /* WINTER  #3B5BA5  – indoor court accent                            */
-/* SUMMER  #E2984B  – beach / sand accent                            */
+/* SUMMER  #E2984B  – beach / sand accent (never paired with white   */
+/*                    text -- fails contrast; use INK on top of it)  */
+/* CORAL   #C1483B  – danger / delete / "Goal" outcome               */
+/* MUTED   #68655B  – secondary text (darkened from a lighter olive- */
+/*                    gray for contrast, same hue, ~5.2:1 on paper;  */
+/*                    text-gray-400/500 are separately darkened at   */
+/*                    the Tailwind theme level, see index.css)       */
 /* LINE    #DAD7CC  – hairline borders                               */
 /* ---------------------------------------------------------------- */
 
@@ -238,14 +244,15 @@ const KIP_PROMPTS = [
 /* Small UI atoms                                                    */
 /* ---------------------------------------------------------------- */
 
-function Chip({ active, onClick, children, accent = "#0E8388" }) {
+function Chip({ active, onClick, children, accent = "#0E8388", activeFg = "#fff" }) {
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap border transition-colors"
       style={
         active
-          ? { background: accent, borderColor: accent, color: "#fff" }
+          ? { background: accent, borderColor: accent, color: activeFg }
           : { background: "transparent", borderColor: "#DAD7CC", color: "#12213A" }
       }
     >
@@ -254,18 +261,47 @@ function Chip({ active, onClick, children, accent = "#0E8388" }) {
   );
 }
 
+// Shared icon-only control -- exists so a button with no visible text
+// can't ship without an accessible name (required, not optional) or a
+// real tap target. `pad` expands the clickable area via padding that's
+// cancelled by an equal negative margin, so it grows into the
+// surrounding whitespace rather than shifting layout. Default (14,
+// ~44px total with a 16px icon) suits isolated controls with open space
+// around them -- a modal's corner close button, a lone send button.
+// Pass a smaller `pad` (e.g. 9, ~31px) for buttons packed into tightly
+// stacked list rows: expanding those to the full 44px would make
+// neighboring rows' tap targets overlap, which is worse than the
+// original problem, not better.
+function IconButton({ icon: Icon, size = 16, label, onClick, disabled, color, pad = 14, className = "" }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      style={{ padding: pad, margin: -pad }}
+      className={`inline-flex items-center justify-center rounded-full disabled:opacity-40 ${className}`}
+    >
+      <Icon size={size} color={color} />
+    </button>
+  );
+}
+
 function SeasonBadge({ season }) {
+  // Summer's amber (#E2984B) fails contrast with white text (2.38:1,
+  // needs 4.5:1) -- ink on top of it comfortably passes (~6.8:1), so
+  // Summer gets a different foreground rather than a different amber.
   const map = {
-    Winter: { bg: "#3B5BA5", label: "Winter · Court", Icon: Snowflake },
-    Summer: { bg: "#E2984B", label: "Summer · Sand", Icon: Waves },
-    Both: { bg: "#0E8388", label: "Both seasons", Icon: Target },
+    Winter: { bg: "#3B5BA5", fg: "#fff", label: "Winter · Court", Icon: Snowflake },
+    Summer: { bg: "#E2984B", fg: "#12213A", label: "Summer · Sand", Icon: Waves },
+    Both: { bg: "#0E8388", fg: "#fff", label: "Both seasons", Icon: Target },
   };
   const cfg = map[season] || map.Both;
   const { Icon } = cfg;
   return (
     <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide text-white"
-      style={{ background: cfg.bg }}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+      style={{ background: cfg.bg, color: cfg.fg }}
     >
       <Icon size={11} strokeWidth={2.5} />
       {cfg.label}
@@ -1034,10 +1070,13 @@ function TopBar({ season, setSeason }) {
               <button
                 key={s}
                 onClick={() => setSeason(s)}
+                aria-pressed={active}
                 className="flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-bold uppercase tracking-wide transition-colors"
                 style={{
                   background: active ? activeBg : "transparent",
-                  color: active ? "#fff" : "rgba(255,255,255,0.55)",
+                  // Summer's amber fails contrast with white (2.38:1) --
+                  // ink passes comfortably (~6.8:1), Winter's blue keeps white.
+                  color: active ? (s === "Summer" ? "#12213A" : "#fff") : "rgba(255,255,255,0.55)",
                 }}
               >
                 <Icon size={13} strokeWidth={2.5} />
@@ -1073,7 +1112,7 @@ function BottomNav({ tab, setTab, hasKipAlert }) {
               key={id}
               onClick={() => setTab(id)}
               className="flex-1 flex flex-col items-center gap-0.5 py-2 px-0.5 min-w-0 relative"
-              style={{ color: active ? "#0E8388" : "#8A8779" }}
+              style={{ color: active ? "#0E8388" : "#68655B" }}
             >
               <div className="relative">
                 <Icon size={18} strokeWidth={active ? 2.5 : 2} />
@@ -1152,7 +1191,7 @@ function HelpButton({ onClick }) {
       onClick={onClick}
       aria-label="Help with this screen"
       className="w-6 h-6 rounded-full flex items-center justify-center border shrink-0"
-      style={{ borderColor: "#DAD7CC", color: "#8A8779" }}
+      style={{ borderColor: "#DAD7CC", color: "#68655B" }}
     >
       <span className="text-[11px] font-bold">?</span>
     </button>
@@ -1207,7 +1246,7 @@ function HelpPanel({ initialArticleId, onClose, onOpenKip }) {
           </div>
           {showingHome && (
             <div className="flex items-center gap-2 rounded-lg px-3 py-2 border" style={{ background: "#F3F2ED", borderColor: "#DAD7CC" }}>
-              <Search size={15} color="#8A8779" />
+              <Search size={15} color="#68655B" />
               <input
                 autoFocus
                 value={query}
@@ -1320,7 +1359,7 @@ function Library({ exercises, season, onAdd, onDelete, profile }) {
             key={id}
             onClick={() => setView(id)}
             className="flex-1 py-2 text-xs font-bold uppercase tracking-wide"
-            style={view === id ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
+            style={view === id ? { background: "#12213A", color: "#fff" } : { color: "#68655B" }}
           >
             {label}
           </button>
@@ -1333,7 +1372,7 @@ function Library({ exercises, season, onAdd, onDelete, profile }) {
         <>
       <div className="flex items-center gap-2 mb-3">
         <div className="flex-1 flex items-center gap-2 bg-white rounded-lg px-3 py-2 border" style={{ borderColor: "#DAD7CC" }}>
-          <Search size={16} color="#8A8779" />
+          <Search size={16} color="#68655B" />
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -1436,7 +1475,7 @@ function ExerciseRow({ ex, onClick }) {
               Physio
             </span>
           ) : ex.custom && (
-            <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>
+            <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#68655B" }}>
               Mine
             </span>
           )}
@@ -1585,10 +1624,8 @@ function Modal({ onClose, children }) {
         className="bg-[#F3F2ED] rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto p-5"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex justify-end -mt-1 -mr-1 mb-1">
-          <button onClick={onClose} className="p-1.5 rounded-full" style={{ background: "#fff" }}>
-            <X size={16} />
-          </button>
+        <div className="flex justify-end mb-1">
+          <IconButton icon={X} size={16} label="Close" onClick={onClose} pad={12} className="bg-white" />
         </div>
         {children}
       </div>
@@ -1666,9 +1703,9 @@ function Builder({ exercises, season, profile, matches, plans, adHocSessions, op
         <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">Season</div>
         <div className="flex gap-2">
           {["Winter", "Summer"].map((s) => (
-            <button key={s} onClick={() => setBlockSeason(s)}
+            <button key={s} onClick={() => setBlockSeason(s)} aria-pressed={blockSeason === s}
               className="flex-1 py-2.5 rounded-lg text-xs font-bold border flex items-center justify-center gap-1.5"
-              style={blockSeason === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
+              style={blockSeason === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: s === "Winter" ? "#fff" : "#12213A", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
               {s === "Winter" ? <Snowflake size={13} /> : <Waves size={13} />}
               {s === "Winter" ? "Winter · Court handball" : "Summer · Beach handball"}
             </button>
@@ -1881,9 +1918,7 @@ function PlanEditor({ plan, exercises, onBack, onSave }) {
                                 </div>
                               )}
                             </div>
-                            <button onClick={() => removeExerciseFromSession(wi, si, entry.entryId)}>
-                              <X size={13} color="#C1483B" />
-                            </button>
+                            <IconButton icon={X} size={13} label="Remove exercise" onClick={() => removeExerciseFromSession(wi, si, entry.entryId)} color="#C1483B" pad={9} />
                           </div>
                         );
                       })}
@@ -1931,7 +1966,7 @@ function ExercisePickerModal({ exercises, season, onClose, onPick }) {
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-3">Add an exercise</h3>
       <div className="flex items-center gap-2 bg-white rounded-lg px-3 py-2 border mb-3" style={{ borderColor: "#DAD7CC" }}>
-        <Search size={15} color="#8A8779" />
+        <Search size={15} color="#68655B" />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" className="flex-1 text-sm outline-none bg-transparent" />
       </div>
       {season && (
@@ -2012,9 +2047,9 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <button onClick={() => goMonth(-1)} className="p-1.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}><ChevronLeft size={14} /></button>
+        <button onClick={() => goMonth(-1)} aria-label="Previous month" className="p-2.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}><ChevronLeft size={14} /></button>
         <div className="text-sm font-bold" style={{ color: "#12213A" }}>{monthLabel}</div>
-        <button onClick={() => goMonth(1)} className="p-1.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}><ChevronRight size={14} /></button>
+        <button onClick={() => goMonth(1)} aria-label="Next month" className="p-2.5 rounded-lg border" style={{ borderColor: "#DAD7CC" }}><ChevronRight size={14} /></button>
       </div>
 
       <div className="grid grid-cols-7 gap-1 mb-1">
@@ -2072,7 +2107,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
                 {session.completed ? <CheckCircle2 size={13} color="#0E8388" /> : <Circle size={13} color="#DAD7CC" />}
                 {plan.name} — Week {week.weekNumber}, Session {session.sessionNumber}
               </button>
-              <button onClick={() => onRequestDateChange(plan, week.weekId, session.sessionId, session.date)} className="text-[10px] font-semibold mt-1" style={{ color: "#8A8779" }}>
+              <button onClick={() => onRequestDateChange(plan, week.weekId, session.sessionId, session.date)} className="text-[10px] font-semibold mt-1" style={{ color: "#68655B" }}>
                 Change date
               </button>
             </div>
@@ -2189,7 +2224,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
             key={id}
             onClick={() => setView(id)}
             className="flex-1 py-2 text-xs font-bold uppercase tracking-wide"
-            style={view === id ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
+            style={view === id ? { background: "#12213A", color: "#fff" } : { color: "#68655B" }}
           >
             {label}
           </button>
@@ -2293,7 +2328,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
           <button
             onClick={() => setLogTarget({ plan: next.plan, weekId: next.week.weekId, sessionId: next.session.sessionId, focus: next.session.focus })}
             className="w-full mt-1.5 py-1.5 rounded-lg text-[11px] font-semibold"
-            style={{ color: "#8A8779" }}
+            style={{ color: "#68655B" }}
           >
             Or log it after the fact
           </button>
@@ -2310,7 +2345,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
       {upcomingMatch && (
         <div className="rounded-lg border p-3 flex items-center justify-between" style={{ borderColor: "#DAD7CC", background: "#fff" }}>
           <div>
-            <div className="text-[10px] font-bold uppercase tracking-wide mb-0.5" style={{ color: "#8A8779" }}>Coming up</div>
+            <div className="text-[10px] font-bold uppercase tracking-wide mb-0.5" style={{ color: "#68655B" }}>Coming up</div>
             <div className="text-sm font-bold" style={{ color: "#12213A" }}>vs {upcomingMatch.opponent}</div>
             <div className="text-[11px] text-gray-500">{formatShortDate(upcomingMatch.date)}{upcomingMatch.competition ? ` · ${upcomingMatch.competition}` : ""}</div>
           </div>
@@ -2391,7 +2426,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
                             {s.completed ? <CheckCircle2 size={14} color="#0E8388" /> : <Circle size={14} color="#DAD7CC" />}
                             Session {s.sessionNumber}
                             {s.completed && s.rpe && (
-                              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>
+                              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#68655B" }}>
                                 RPE {s.rpe}
                               </span>
                             )}
@@ -2399,7 +2434,7 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
                           <button
                             onClick={(e) => { e.stopPropagation(); setDateTarget({ plan: p, weekId: w.weekId, sessionId: s.sessionId, current: s.date || "" }); }}
                             className="flex items-center gap-1 text-[10px] font-semibold mb-1"
-                            style={{ color: s.date ? "#0E8388" : "#8A8779" }}
+                            style={{ color: s.date ? "#0E8388" : "#68655B" }}
                           >
                             <CalendarRange size={11} />
                             {s.date ? formatShortDate(s.date) : "Set date"}
@@ -2833,7 +2868,7 @@ function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, on
         <Field label="Discipline">
           <div className="flex gap-2">
             {["Winter", "Summer"].map((s) => (
-              <button key={s} onClick={() => setForm({ ...form, season: s })} className="flex-1 py-2 rounded-lg text-xs font-bold border flex items-center justify-center gap-1.5" style={form.season === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
+              <button key={s} onClick={() => setForm({ ...form, season: s })} aria-pressed={form.season === s} className="flex-1 py-2 rounded-lg text-xs font-bold border flex items-center justify-center gap-1.5" style={form.season === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: s === "Winter" ? "#fff" : "#12213A", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
                 {s === "Winter" ? <Snowflake size={13} /> : <Waves size={13} />}
                 {s === "Winter" ? "Indoor" : "Beach"}
               </button>
@@ -2973,9 +3008,7 @@ function GymSetLogger({ exerciseName, sets, onChange }) {
               placeholder="0"
               className="input py-1.5 text-sm text-center"
             />
-            <button onClick={() => removeSet(i)} className="p-1 text-gray-300">
-              <X size={14} />
-            </button>
+            <IconButton icon={X} size={14} label="Remove set" onClick={() => removeSet(i)} color="#C1483B" pad={9} />
           </div>
         ))}
       </div>
@@ -3030,7 +3063,7 @@ function AdHocSessionFormModal({ exercises, initialDate, onClose, onSave }) {
               return (
                 <div key={id} className="flex items-center justify-between bg-white rounded-md px-2 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
                   {ex.name}
-                  <button onClick={() => setExerciseIds(exerciseIds.filter((x) => x !== id))}><X size={13} color="#C1483B" /></button>
+                  <IconButton icon={X} size={13} label="Remove exercise" onClick={() => setExerciseIds(exerciseIds.filter((x) => x !== id))} color="#C1483B" pad={9} />
                 </div>
               );
             })}
@@ -3199,11 +3232,11 @@ function KipQuickPanel({ kind, doneCount, totalItems, match, opponents = [], pro
             <Sparkles size={15} color="#0E8388" />
             <span className="text-sm font-black" style={{ color: "#12213A" }}>Ask Kip</span>
           </div>
-          <button onClick={onClose}><X size={18} /></button>
+          <IconButton icon={X} size={18} label="Close" onClick={onClose} color="#12213A" />
         </div>
 
         {loadingChip && (
-          <div className="rounded-lg px-3 py-2 mb-3 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>Reading…</div>
+          <div className="rounded-lg px-3 py-2 mb-3 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#68655B" }}>Reading…</div>
         )}
         {!loadingChip && note && (
           <div className="rounded-lg px-3 py-2 mb-3 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#12213A" }}>{note}</div>
@@ -3331,34 +3364,34 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
           const hasLogged = item.loggedSets && item.loggedSets.length > 0;
           return (
             <div key={item.key} className="bg-white rounded-lg border overflow-hidden" style={{ borderColor: "#DAD7CC" }}>
-              <button
-                onClick={() => (isGym ? setExpandedId(expanded ? null : item.key) : toggleDone(item))}
-                className="w-full p-3 flex items-center gap-2.5 text-left"
-              >
-                {(item.done || hasLogged) ? <CheckCircle2 size={18} color="#0E8388" className="shrink-0" /> : <Circle size={18} color="#DAD7CC" className="shrink-0" />}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <div className="text-sm font-semibold" style={{ color: "#12213A" }}>{ex.name}</div>
-                    {ex.source === "physio" && (
-                      <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0" style={{ background: "#FCEFE9", color: "#C1483B" }}>
-                        Physio
-                      </span>
+              <div className="w-full p-3 flex items-center gap-2.5">
+                <button
+                  onClick={() => (isGym ? setExpandedId(expanded ? null : item.key) : toggleDone(item))}
+                  className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
+                >
+                  {(item.done || hasLogged) ? <CheckCircle2 size={18} color="#0E8388" className="shrink-0" /> : <Circle size={18} color="#DAD7CC" className="shrink-0" />}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <div className="text-sm font-semibold" style={{ color: "#12213A" }}>{ex.name}</div>
+                      {ex.source === "physio" && (
+                        <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0" style={{ background: "#FCEFE9", color: "#C1483B" }}>
+                          Physio
+                        </span>
+                      )}
+                    </div>
+                    {item.reps && <div className="text-[11px] text-gray-400">{item.reps}</div>}
+                    {hasLogged && (
+                      <div className="text-[10px] text-gray-400">
+                        {item.loggedSets.map((s, i) => `${s.weight ?? "–"}kg×${s.reps ?? "–"}`).join(", ")}
+                      </div>
                     )}
                   </div>
-                  {item.reps && <div className="text-[11px] text-gray-400">{item.reps}</div>}
-                  {hasLogged && (
-                    <div className="text-[10px] text-gray-400">
-                      {item.loggedSets.map((s, i) => `${s.weight ?? "–"}kg×${s.reps ?? "–"}`).join(", ")}
-                    </div>
-                  )}
-                </div>
-                {isGym && (expanded ? <ChevronDown size={16} className="rotate-180 transition-transform" /> : <ChevronRight size={16} color="#DAD7CC" />)}
+                  {isGym && (expanded ? <ChevronDown size={16} className="rotate-180 transition-transform" /> : <ChevronRight size={16} color="#DAD7CC" />)}
+                </button>
                 {kind === "adhoc" && !isGym && (
-                  <span onClick={(e) => { e.stopPropagation(); removeAdHocExercise(item.key); }} className="p-1">
-                    <X size={13} color="#C1483B" />
-                  </span>
+                  <IconButton icon={X} size={13} label="Remove exercise" onClick={() => removeAdHocExercise(item.key)} color="#C1483B" pad={9} />
                 )}
-              </button>
+              </div>
               {isGym && expanded && (
                 <div className="px-3 pb-3">
                   <GymSetLogger exerciseName={ex.name} sets={item.loggedSets || []} onChange={(sets) => saveGymSets(item, sets)} />
@@ -3493,12 +3526,12 @@ function LogSessionModal({ onClose, onSave, focus, gymEntries = [], initialRpe =
           ))}
         </div>
       )}
-      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1">RPE (effort, 1–10)</div>
-      <div className="grid grid-cols-5 gap-1.5 mb-3">
+      <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1" id="rpe-label">RPE (effort, 1–10)</div>
+      <div className="grid grid-cols-5 gap-1.5 mb-3" role="radiogroup" aria-labelledby="rpe-label">
         {Array.from({ length: 10 }).map((_, i) => {
           const n = i + 1;
           return (
-            <button key={n} onClick={() => setRpe(n)} className="py-2 rounded-lg text-xs font-bold border" style={rpe === n ? { background: "#12213A", color: "#fff", borderColor: "#12213A" } : { borderColor: "#DAD7CC" }}>
+            <button key={n} onClick={() => setRpe(n)} role="radio" aria-checked={rpe === n} aria-label={`RPE ${n}`} className="py-2 rounded-lg text-xs font-bold border" style={rpe === n ? { background: "#12213A", color: "#fff", borderColor: "#12213A" } : { borderColor: "#DAD7CC" }}>
               {n}
             </button>
           );
@@ -3632,7 +3665,7 @@ function NiggleDetailModal({ niggle, exercises, plans, onClose, onSave, onApplyP
                 <Paperclip size={12} className="shrink-0" />
                 <span className="truncate font-semibold">{f.name}</span>
               </button>
-              <button onClick={() => removeFile(f)}><X size={13} color="#C1483B" /></button>
+              <IconButton icon={X} size={13} label="Remove file" onClick={() => removeFile(f)} color="#C1483B" pad={9} />
             </div>
           ))}
           {files.length === 0 && <div className="text-[11px] text-gray-400">No files attached.</div>}
@@ -3671,7 +3704,7 @@ function NiggleDetailModal({ niggle, exercises, plans, onClose, onSave, onApplyP
                     return (
                       <div key={id} className="flex items-center justify-between bg-white rounded-md px-2 py-1 border text-[11px]" style={{ borderColor: "#DAD7CC" }}>
                         {ex.name}
-                        <button onClick={() => setLogExerciseIds(logExerciseIds.filter((x) => x !== id))}><X size={11} color="#C1483B" /></button>
+                        <IconButton icon={X} size={11} label="Remove exercise" onClick={() => setLogExerciseIds(logExerciseIds.filter((x) => x !== id))} color="#C1483B" pad={9} />
                       </div>
                     );
                   })}
@@ -3686,7 +3719,7 @@ function NiggleDetailModal({ niggle, exercises, plans, onClose, onSave, onApplyP
             <div key={entry.id} className="bg-white rounded-md px-2.5 py-2 border" style={{ borderColor: "#DAD7CC" }}>
               <div className="flex items-center justify-between mb-0.5">
                 <div className="text-[11px] font-bold" style={{ color: "#12213A" }}>{formatShortDate(entry.date)}</div>
-                <button onClick={() => removeLogEntry(entry.id)}><X size={12} color="#C1483B" /></button>
+                <IconButton icon={X} size={12} label="Remove log entry" onClick={() => removeLogEntry(entry.id)} color="#C1483B" pad={9} />
               </div>
               <div className="text-xs text-gray-600">{entry.note}</div>
               {entry.exerciseIds && entry.exerciseIds.length > 0 && (
@@ -3883,7 +3916,13 @@ function ScheduleReviewModal({ file, season, onClose, onConfirmed }) {
           <div className="space-y-2 mb-3 max-h-96 overflow-y-auto">
             {rows.map((r) => (
               <div key={r.id} className="bg-white rounded-lg border p-2.5 flex gap-2" style={{ borderColor: r.selected ? "#0E8388" : "#DAD7CC" }}>
-                <button onClick={() => updateRow(r.id, { selected: !r.selected })} className="shrink-0 pt-1">
+                <button
+                  onClick={() => updateRow(r.id, { selected: !r.selected })}
+                  role="checkbox"
+                  aria-checked={r.selected}
+                  aria-label={`Include ${r.opponent || "this fixture"}`}
+                  className="shrink-0 pt-1"
+                >
                   {r.selected ? <CheckCircle2 size={18} color="#0E8388" /> : <Circle size={18} color="#DAD7CC" />}
                 </button>
                 <div className="flex-1 min-w-0 space-y-1.5">
@@ -3993,7 +4032,7 @@ function PtPlanReviewModal({ file, plans, onClose, onConfirmed }) {
               <div key={i} className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
                 <div className="flex items-center gap-2 mb-1.5">
                   <input className="input flex-1" placeholder="Exercise name" value={it.name} onChange={(e) => updateItem(i, { name: e.target.value })} />
-                  <button onClick={() => removeItem(i)}><X size={14} color="#C1483B" /></button>
+                  <IconButton icon={X} size={14} label="Remove exercise" onClick={() => removeItem(i)} color="#C1483B" pad={9} />
                 </div>
                 <input className="input mb-1.5 text-xs" placeholder="Sets/reps or duration, e.g. 3 x 15" value={it.prescription} onChange={(e) => updateItem(i, { prescription: e.target.value })} />
                 <textarea className="input text-xs" rows={2} placeholder="Notes from the physio (optional)" value={it.notes} onChange={(e) => updateItem(i, { notes: e.target.value })} />
@@ -4194,7 +4233,7 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
                 <div className="text-[10px] text-gray-400">{f.tag}</div>
               </div>
             </button>
-            <button onClick={() => removeFile(f)}><X size={13} color="#C1483B" /></button>
+            <IconButton icon={X} size={13} label="Remove file" onClick={() => removeFile(f)} color="#C1483B" pad={9} />
           </div>
         ))}
         {rows.length === 0 && <div className="text-[11px] text-gray-400">No files uploaded yet.</div>}
@@ -4324,7 +4363,7 @@ function NotificationsSection({ profile, onSaveProfile }) {
           <button
             onClick={() => onSaveProfile({ ...profile, alertsEnabled: !alertsEnabled })}
             className="flex items-center gap-1 text-[11px] font-semibold"
-            style={{ color: alertsEnabled ? "#0E8388" : "#8A8779" }}
+            style={{ color: alertsEnabled ? "#0E8388" : "#68655B" }}
           >
             {alertsEnabled ? <Bell size={12} /> : <BellOff size={12} />}
             {alertsEnabled ? "On" : "Off"}
@@ -4446,7 +4485,7 @@ function TeammatesSection() {
           <button onClick={copyCode} className="flex-1 text-left rounded-md px-2.5 py-2 text-sm font-mono font-bold tracking-wide" style={{ background: "#F3F2ED", color: "#12213A" }}>
             {inviteCode || "…"}
           </button>
-          <button onClick={handleRegenerate} disabled={regenerating} className="px-3 rounded-md text-[11px] font-semibold border disabled:opacity-40" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
+          <button onClick={handleRegenerate} disabled={regenerating} className="px-3 rounded-md text-[11px] font-semibold border disabled:opacity-40" style={{ borderColor: "#DAD7CC", color: "#68655B" }}>
             {regenerating ? "…" : "New code"}
           </button>
         </div>
@@ -4498,7 +4537,7 @@ function TeammatesSection() {
                       disabled={busyId === c.id}
                       onClick={() => withBusy(c.id, () => declineConnection(c.id))}
                       className="px-2.5 py-1 rounded-md text-[11px] font-bold disabled:opacity-40"
-                      style={{ color: "#8A8779" }}
+                      style={{ color: "#68655B" }}
                     >
                       Decline
                     </button>
@@ -4520,7 +4559,7 @@ function TeammatesSection() {
               return (
                 <div key={c.id} className="rounded-md px-2.5 py-2" style={{ background: "#F3F2ED" }}>
                   <div className="flex items-center justify-between">
-                    <div className="text-xs pr-2" style={{ color: "#8A8779" }}>Waiting for {partner.email || "them"} to accept</div>
+                    <div className="text-xs pr-2" style={{ color: "#68655B" }}>Waiting for {partner.email || "them"} to accept</div>
                     <button
                       disabled={busyId === c.id}
                       onClick={() => withBusy(c.id, () => revokeConnection(c.id))}
@@ -4871,7 +4910,7 @@ function KipOnboarding({ profile, onSave, onCancel, onSaveProfile, exercises, pl
             <div key={n.id} className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
               <div className="flex items-center gap-2 mb-1.5">
                 <input className="input flex-1" placeholder="Body part" value={n.part} onChange={(e) => updateNiggle(n.id, { part: e.target.value })} />
-                <button onClick={() => removeNiggle(n.id)}><X size={14} color="#C1483B" /></button>
+                <IconButton icon={X} size={14} label="Remove niggle" onClick={() => removeNiggle(n.id)} color="#C1483B" pad={9} />
               </div>
               <div className="flex items-center justify-between gap-2">
                 <div className="flex gap-1">
@@ -5112,6 +5151,174 @@ async function extractScheduleFromFile(file) {
   } catch (e) {
     return { looksLikeSchedule: false, fixtures: [], reason: "Kip's response wasn't in the expected format." };
   }
+}
+
+/* ---------------------------------------------------------------- */
+/* AI-assisted shot detection from an uploaded match video            */
+/* Upload-only, per the brief -- YouTube's embed deliberately doesn't */
+/* expose frame data, so this never touches a linked YouTube URL.     */
+/* Reuses kip-chat verbatim: image content blocks already work        */
+/* through this exact proxy for PT-plan photo extraction above, so    */
+/* no backend change was needed here at all.                          */
+/* ---------------------------------------------------------------- */
+
+const SHOT_DETECTION_PROMPT = `You are looking at one or more sequential frames from a handball match video, captured around a moment a cheap motion-detection pass flagged as possibly containing a shot at goal. You are using general visual understanding, not a specialised ball-tracking model -- if you genuinely can't tell, say so via low confidence and null fields rather than guessing.
+
+Respond with ONLY a single JSON object, no other text before or after it, in exactly this shape:
+
+{"isShot": boolean, "outcome": "Save" | "Goal" | null, "zone": "TL" | "TM" | "TR" | "ML" | "MM" | "MR" | "BL" | "BM" | "BR" | null, "confidence": "high" | "medium" | "low", "reason": string}
+
+- "isShot" is true only if this genuinely looks like a shot at the goal being taken and resolved (saved or scored) -- not a pass, a fast break, a throw-in, a warm-up, a celebration, or a crowd/bench/sideline shot. If the frames don't clearly show the goal and goalkeeper, isShot is false.
+- "outcome": "Save" if the goalkeeper stops it, "Goal" if it goes in. Null if isShot is false or the outcome genuinely isn't visible.
+- "zone" is a 3x3 grid of the goal FROM THE GOALKEEPER'S OWN PERSPECTIVE, facing the shooter: first letter is row (T=top, M=middle, B=bottom), second is column (L=left, M=middle, R=right) -- e.g. "TL" is top-left as the goalkeeper sees it, which is the shooter's top-right. Null if not visible or not applicable.
+- "confidence" reflects how sure you actually are, not how complete the JSON looks -- use "low" freely when the footage is blurry, too wide, or ambiguous.
+- "reason" is one short sentence explaining the call, useful for a human reviewing your suggestion afterward.`;
+
+// One call per candidate moment, 1-3 frames (the flagged peak plus a little
+// temporal context) so Claude can see the shot resolve rather than judging
+// a single static frame. Returns the parsed detection plus the raw
+// `usage` block so the caller can accumulate real cost, not an estimate.
+async function detectShotAtMoment(frameDataUrls) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const imageBlocks = frameDataUrls.map((dataUrl) => ({
+    type: "image",
+    source: { type: "base64", media_type: "image/jpeg", data: dataUrl.split(",")[1] },
+  }));
+  const response = await fetch("/.netlify/functions/kip-chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session?.access_token}`,
+    },
+    body: JSON.stringify({
+      system: SHOT_DETECTION_PROMPT,
+      messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Is this a shot at goal? Answer per the instructions." }] }],
+      maxTokens: 300,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Detection request failed");
+  const usage = data.usage || {};
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : text);
+    return {
+      isShot: !!parsed.isShot,
+      outcome: parsed.outcome === "Save" || parsed.outcome === "Goal" ? parsed.outcome : null,
+      zone: ZONE_LABELS[parsed.zone] ? parsed.zone : null,
+      confidence: ["high", "medium", "low"].includes(parsed.confidence) ? parsed.confidence : "low",
+      reason: parsed.reason || null,
+      usage,
+    };
+  } catch (e) {
+    return { isShot: false, outcome: null, zone: null, confidence: "low", reason: "Couldn't parse Kip's response.", usage };
+  }
+}
+
+// Client-side only, no server or API call involved -- a cheap, free
+// pre-filter deciding which moments are even worth spending a vision call
+// on, not a detector itself. Samples the video at a fixed grid (every
+// SAMPLE_INTERVAL_S), scores frame-to-frame motion on a small downscaled
+// grayscale copy (fast: a few thousand pixels, not the real frame), and
+// keeps only the local peak of each distinct burst that clears a
+// per-video self-calibrated threshold (mean + 1 stdev of that video's own
+// motion signal, since lighting/camera/compression vary a lot between
+// uploads) -- collapsing one sustained burst of action into one
+// candidate, at least CANDIDATE_COOLDOWN_S apart, rather than a
+// candidate per sampled frame. Handball is continuously fast-moving, so
+// this is a genuine, untested judgment call, not a proven filter -- see
+// DECISIONS.md for how the first real test read on it.
+const SAMPLE_INTERVAL_S = 0.5;
+const CANDIDATE_COOLDOWN_S = 4;
+const MOTION_SAMPLE_WIDTH = 64;
+
+async function detectCandidateMoments(videoUrl, { onProgress } = {}) {
+  const video = document.createElement("video");
+  video.crossOrigin = "anonymous";
+  video.preload = "auto";
+  video.src = videoUrl;
+  video.muted = true;
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = resolve;
+    video.onerror = () => reject(new Error("Couldn't read the video file."));
+  });
+
+  const duration = video.duration;
+  const width = MOTION_SAMPLE_WIDTH;
+  const height = Math.max(1, Math.round(width * (video.videoHeight / video.videoWidth))) || width;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  async function grabGray(t) {
+    await new Promise((resolve) => {
+      const onSeeked = () => { video.removeEventListener("seeked", onSeeked); resolve(); };
+      video.addEventListener("seeked", onSeeked);
+      video.currentTime = t;
+    });
+    ctx.drawImage(video, 0, 0, width, height);
+    const { data } = ctx.getImageData(0, 0, width, height);
+    const gray = new Float32Array(width * height);
+    for (let i = 0; i < gray.length; i++) {
+      const o = i * 4;
+      gray[i] = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
+    }
+    return gray;
+  }
+
+  const scores = [];
+  let prevGray = null;
+  const totalSteps = Math.max(1, Math.floor(duration / SAMPLE_INTERVAL_S));
+  for (let i = 0; i <= totalSteps; i++) {
+    const t = Math.min(i * SAMPLE_INTERVAL_S, Math.max(0, duration - 0.05));
+    const gray = await grabGray(t);
+    if (prevGray) {
+      let diff = 0;
+      for (let p = 0; p < gray.length; p++) diff += Math.abs(gray[p] - prevGray[p]);
+      scores.push({ t, score: diff / gray.length });
+    }
+    prevGray = gray;
+    onProgress?.((i + 1) / (totalSteps + 1));
+  }
+
+  const mean = scores.reduce((a, s) => a + s.score, 0) / (scores.length || 1);
+  const variance = scores.reduce((a, s) => a + (s.score - mean) ** 2, 0) / (scores.length || 1);
+  const threshold = mean + Math.sqrt(variance);
+
+  const candidates = [];
+  let lastCandidateT = -Infinity;
+  for (let i = 0; i < scores.length; i++) {
+    const { t, score } = scores[i];
+    if (score < threshold) continue;
+    if (t - lastCandidateT < CANDIDATE_COOLDOWN_S) continue;
+    let peakIdx = i;
+    let j = i;
+    while (j < scores.length && scores[j].score >= threshold && scores[j].t - t < CANDIDATE_COOLDOWN_S) {
+      if (scores[j].score > scores[peakIdx].score) peakIdx = j;
+      j++;
+    }
+    candidates.push(scores[peakIdx].t);
+    lastCandidateT = scores[peakIdx].t;
+  }
+
+  return { candidates, duration, sampledCount: scores.length, threshold, meanMotion: mean };
+}
+
+// Grabs one full-resolution JPEG frame at a timestamp -- separate from the
+// downscaled grayscale sampling above, since these are what actually get
+// sent to the vision API and need to be legible, not just diffable.
+async function grabFrameJpeg(video, canvas, ctx, t, quality = 0.7) {
+  await new Promise((resolve) => {
+    const onSeeked = () => { video.removeEventListener("seeked", onSeeked); resolve(); };
+    video.addEventListener("seeked", onSeeked);
+    video.currentTime = Math.max(0, t);
+  });
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  ctx.drawImage(video, 0, 0);
+  return canvas.toDataURL("image/jpeg", quality);
 }
 
 /* ---------------------------------------------------------------- */
@@ -5360,7 +5567,7 @@ function KipMessageThread({ messages, sending, error, onSaveMessages, onSavePlan
       ))}
       {sending && (
         <div className="flex justify-start">
-          <div className="rounded-2xl px-3 py-2 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#8A8779" }}>
+          <div className="rounded-2xl px-3 py-2 text-sm bg-white border" style={{ borderColor: "#DAD7CC", color: "#68655B" }}>
             Kip is thinking…
           </div>
         </div>
@@ -5466,18 +5673,18 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
           <div className="flex items-center gap-1.5">
             <Sparkles size={15} color="#0E8388" />
             <span className="text-sm font-black" style={{ color: "#12213A" }}>Kip</span>
-            <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#8A8779" }}>Beta</span>
+            <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#F3F2ED", color: "#68655B" }}>Beta</span>
           </div>
           <button onClick={onOpenProfile} className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Profile</button>
         </div>
         <div className="flex items-center justify-between">
-          <button onClick={() => setShowBadges(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#8A8779" }}>
+          <button onClick={() => setShowBadges(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#68655B" }}>
             <Trophy size={12} color="#E2984B" /> {points.total.toLocaleString()} pts
           </button>
           <button
             onClick={() => onSaveProfile({ ...profile, alertsEnabled: !alertsEnabled })}
             className="flex items-center gap-1 text-[11px] font-semibold"
-            style={{ color: alertsEnabled ? "#0E8388" : "#8A8779" }}
+            style={{ color: alertsEnabled ? "#0E8388" : "#68655B" }}
           >
             {alertsEnabled ? <Bell size={12} /> : <BellOff size={12} />}
             {alertsEnabled ? "Alerts on" : "Alerts off"}
@@ -5516,6 +5723,7 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
           <button
             onClick={() => sendMessage(input)}
             disabled={sending || !input.trim()}
+            aria-label="Send message"
             className="w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0 disabled:opacity-40"
             style={{ background: "#0E8388" }}
           >
@@ -5628,6 +5836,7 @@ function KipAssistantSheet({ profile, messages, onSaveMessages, plans, season, m
           <button
             onClick={() => sendMessage(input)}
             disabled={sending || !input.trim()}
+            aria-label="Send message"
             className="w-9 h-9 rounded-full flex items-center justify-center text-white shrink-0 disabled:opacity-40"
             style={{ background: "#0E8388" }}
           >
@@ -5667,7 +5876,7 @@ function BadgesModal({ points, earnedBadgeIds, onClose }) {
           return (
             <div key={b.id} className="flex items-center gap-3 bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC", opacity: earned ? 1 : 0.5 }}>
               <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: earned ? "#E2984B" : "#F3F2ED" }}>
-                {earned ? <Trophy size={16} color="#fff" /> : <Lock size={14} color="#8A8779" />}
+                {earned ? <Trophy size={16} color="#fff" /> : <Lock size={14} color="#68655B" />}
               </div>
               <div>
                 <div className="text-sm font-bold" style={{ color: "#12213A" }}>{b.name}</div>
@@ -5757,18 +5966,27 @@ function GoalGrid({ zones, onZoneTap, size = "normal" }) {
           const z = zones[key] || { saves: 0, goals: 0 };
           const total = z.saves + z.goals;
           const pct = total > 0 ? Math.round((z.saves / total) * 100) : null;
+          const bg = zoneColor(z);
+          // The mid-save-rate amber (#E2984B) fails contrast with white
+          // (2.38:1) -- ink passes comfortably, same fix as everywhere
+          // else this accent pairs with text.
+          const onAmber = bg === "#E2984B";
+          const label = total > 0
+            ? `${ZONE_LABELS[key]}: ${pct}% saved, ${total} shot${total !== 1 ? "s" : ""}`
+            : `${ZONE_LABELS[key]}: no shots logged yet`;
           return (
             <button
               key={key}
               onClick={() => onZoneTap && onZoneTap(key)}
+              aria-label={label}
               className={`${cellClass} flex flex-col items-center justify-center relative`}
-              style={{ background: zoneColor(z) }}
+              style={{ background: bg }}
               disabled={!onZoneTap}
             >
               {total > 0 ? (
                 <>
-                  <span className="text-white font-black text-sm">{pct}%</span>
-                  <span className="text-white/70 text-[9px] font-semibold">{total} shot{total !== 1 ? "s" : ""}</span>
+                  <span className={`font-black text-sm ${onAmber ? "" : "text-white"}`} style={onAmber ? { color: "#12213A" } : undefined}>{pct}%</span>
+                  <span className={`text-[9px] font-semibold ${onAmber ? "" : "text-white/70"}`} style={onAmber ? { color: "rgba(18,33,58,0.75)" } : undefined}>{total} shot{total !== 1 ? "s" : ""}</span>
                 </>
               ) : (
                 onZoneTap && <Plus size={14} color="#B8B5A8" />
@@ -5850,7 +6068,7 @@ function ShotLogModal({ season, zone, videoUrl, roster = [], onClose, onSave }) 
               >
                 {t}
                 {season === "Summer" && (
-                  <span className="ml-1 text-[10px] font-black" style={{ color: pointsForShot(season, t) === 2 ? "#C1483B" : "#8A8779" }}>
+                  <span className="ml-1 text-[10px] font-black" style={{ color: pointsForShot(season, t) === 2 ? "#C1483B" : "#68655B" }}>
                     {outcome === "Goal" ? `+${pointsForShot(season, t)}` : ""}
                   </span>
                 )}
@@ -5977,7 +6195,7 @@ function OpponentDetailModal({ opponentName, opponents, matches, onClose, onSave
             <div className="text-sm">
               {r.number && <span className="font-bold" style={{ color: "#12213A" }}>#{r.number}</span>}{r.number && r.name ? " " : ""}{r.name}
             </div>
-            <button onClick={() => removeEntry(i)}><X size={13} color="#C1483B" /></button>
+            <IconButton icon={X} size={13} label="Remove shooter" onClick={() => removeEntry(i)} color="#C1483B" pad={9} />
           </div>
         ))}
         {roster.length === 0 && <div className="text-xs text-gray-400">No shooters added yet.</div>}
@@ -6037,7 +6255,7 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate, title =
         <Field label="Discipline">
           <div className="flex gap-2">
             {["Winter", "Summer"].map((s) => (
-              <button key={s} onClick={() => setForm({ ...form, season: s })} className="flex-1 py-2 rounded-lg text-xs font-bold border flex items-center justify-center gap-1.5" style={form.season === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
+              <button key={s} onClick={() => setForm({ ...form, season: s })} aria-pressed={form.season === s} className="flex-1 py-2 rounded-lg text-xs font-bold border flex items-center justify-center gap-1.5" style={form.season === s ? { background: s === "Winter" ? "#3B5BA5" : "#E2984B", color: s === "Winter" ? "#fff" : "#12213A", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>
                 {s === "Winter" ? <Snowflake size={13} /> : <Waves size={13} />}
                 {s === "Winter" ? "Indoor" : "Beach"}
               </button>
@@ -6106,35 +6324,403 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate, title =
   );
 }
 
-function MatchVideoLink({ match, onSave }) {
+// Loads the YouTube IFrame Player API script once and shares the same
+// promise across however many players end up mounted -- a second player
+// just awaits the same load rather than injecting the script tag again.
+let youtubeApiPromise = null;
+function loadYouTubeIframeApi() {
+  if (typeof window === "undefined") return Promise.resolve(null);
+  if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+  if (youtubeApiPromise) return youtubeApiPromise;
+  youtubeApiPromise = new Promise((resolve) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => { prev?.(); resolve(window.YT); };
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  });
+  return youtubeApiPromise;
+}
+
+// Manual-review tier only -- YouTube's own official embed, sanctioned use
+// (no downloading, no frame extraction). Exposes seekTo via ref so a
+// shot's logged timestamp can jump the player straight there. This is
+// never a source for AI shot detection: the embed deliberately doesn't
+// expose frame/pixel data to the page, and there's no official API that
+// does -- detection only ever works on a directly-uploaded file, below.
+const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId }, ref) {
+  const containerRef = useRef(null);
+  const playerRef = useRef(null);
+
+  useEffect(() => {
+    if (!videoId) return;
+    let cancelled = false;
+    loadYouTubeIframeApi().then((YT) => {
+      if (cancelled || !containerRef.current || !YT) return;
+      playerRef.current = new YT.Player(containerRef.current, {
+        videoId,
+        playerVars: { rel: 0, modestbranding: 1 },
+      });
+    });
+    return () => {
+      cancelled = true;
+      try { playerRef.current?.destroy?.(); } catch { /* already gone */ }
+      playerRef.current = null;
+    };
+  }, [videoId]);
+
+  useImperativeHandle(ref, () => ({
+    seekTo: (seconds) => playerRef.current?.seekTo?.(seconds, true),
+  }), []);
+
+  return (
+    <div className="rounded-lg overflow-hidden bg-black" style={{ aspectRatio: "16/9" }}>
+      <div ref={containerRef} className="w-full h-full" />
+    </div>
+  );
+});
+
+// Two independent, non-overlapping sections: a plain link (YouTube gets a
+// real embedded player for manual review; anything else stays an external
+// link) and a directly-uploaded file (the only source AI-assisted shot
+// detection can ever use). A keeper can have either, both, or neither --
+// the link section never gates the upload section or vice versa.
+function MatchVideoPanel({ match, onSaveVideoUrl, onSaveVideoFile, onRemoveVideoFile, onOpenDetection }) {
   const [editing, setEditing] = useState(!match.videoUrl);
   const [local, setLocal] = useState(match.videoUrl || "");
-  if (editing) {
-    return (
-      <div className="flex items-center gap-2 mt-2">
-        <input
-          className="input flex-1"
-          placeholder="Video link (YouTube, Drive, etc.)"
-          value={local}
-          onChange={(e) => setLocal(e.target.value)}
-        />
-        <button
-          onClick={() => { onSave(local.trim()); setEditing(false); }}
-          className="text-xs font-bold px-2.5 py-1.5 rounded-lg text-white shrink-0"
-          style={{ background: "#0E8388" }}
-        >
-          Save
-        </button>
-      </div>
-    );
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const youtubeId = extractYouTubeId(match.videoUrl);
+
+  async function handleFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const meta = await uploadMatchVideo(match.id, file);
+      onSaveVideoFile(meta);
+    } catch (err) {
+      setUploadError(err.message || "Upload failed — try again.");
+    } finally {
+      setUploading(false);
+      e.target.value = "";
+    }
   }
+
   return (
-    <div className="flex items-center gap-3 mt-2">
-      <a href={match.videoUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
-        <Video size={13} /> Watch video
-      </a>
-      <button onClick={() => { setLocal(match.videoUrl); setEditing(true); }} className="text-[11px] text-gray-400 font-semibold">Edit</button>
+    <div className="mt-2">
+      {editing ? (
+        <div className="flex items-center gap-2">
+          <input
+            className="input flex-1"
+            placeholder="Video link (YouTube, Drive, etc.)"
+            value={local}
+            onChange={(e) => setLocal(e.target.value)}
+          />
+          <button
+            onClick={() => { onSaveVideoUrl(local.trim()); setEditing(false); }}
+            className="text-xs font-bold px-2.5 py-1.5 rounded-lg text-white shrink-0"
+            style={{ background: "#0E8388" }}
+          >
+            Save
+          </button>
+        </div>
+      ) : (
+        <>
+          {youtubeId ? (
+            <div className="mb-2">
+              <YouTubePlayer videoId={youtubeId} />
+            </div>
+          ) : (
+            <div className="flex items-center gap-3 mb-2">
+              <a href={match.videoUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
+                <Video size={13} /> Watch video
+              </a>
+            </div>
+          )}
+          <button onClick={() => { setLocal(match.videoUrl); setEditing(true); }} className="text-[11px] text-gray-400 font-semibold">Edit link</button>
+        </>
+      )}
+
+      <div className="mt-3 pt-3 border-t" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">AI-assisted shot detection</div>
+        {match.videoFile ? (
+          <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="text-xs font-semibold truncate flex items-center gap-1.5" style={{ color: "#12213A" }}>
+                <Paperclip size={12} className="shrink-0" /> {match.videoFile.name}
+              </div>
+              <IconButton icon={X} size={13} label="Remove uploaded video" onClick={onRemoveVideoFile} color="#C1483B" pad={9} />
+            </div>
+            <button onClick={onOpenDetection} className="w-full py-2 rounded-lg text-xs font-bold text-white" style={{ background: "#0E8388" }}>
+              Detect shots from video
+            </button>
+          </div>
+        ) : (
+          <div>
+            <p className="text-[11px] text-gray-500 mb-2">
+              A YouTube link is watch-only — YouTube doesn't expose frame data to embedded players, by design. Upload the actual video file to let Kip suggest shots for you to review.
+            </p>
+            <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
+              <Upload size={13} /> {uploading ? "Uploading…" : "Upload match video"}
+              <input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+            </label>
+            {uploadError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{uploadError}</div>}
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+// Orchestrates the whole AI-detection pipeline against an uploaded match
+// video: scan for candidate moments (free, client-side) -> a vision call
+// per candidate (costs real money, see the running total below) ->
+// review. Detected shots are suggestions only -- nothing reaches
+// match.shots until the keeper explicitly confirms, same non-negotiable
+// review-before-commit pattern as PtPlanReviewModal/ScheduleReviewModal.
+const SONNET_5_INPUT_PER_MTOK = 2.0;
+const SONNET_5_OUTPUT_PER_MTOK = 10.0;
+
+function VideoShotDetectionFlow({ match, onClose, onConfirmShots }) {
+  const [stage, setStage] = useState("scanning"); // scanning | analyzing | review | failed
+  const [scanProgress, setScanProgress] = useState(0);
+  const [analyzeProgress, setAnalyzeProgress] = useState({ done: 0, total: 0 });
+  const [error, setError] = useState(null);
+  const [results, setResults] = useState([]); // { id, t, thumbnail, outcome, zone, confidence, reason, included }
+  const [usageTotals, setUsageTotals] = useState({ inputTokens: 0, outputTokens: 0, calls: 0 });
+  const [scanStats, setScanStats] = useState(null);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    (async () => {
+      let signedUrl;
+      try {
+        signedUrl = await getSignedMatchVideoUrl(match.videoFile.path);
+      } catch (e) {
+        setError("Couldn't access the uploaded video — try again.");
+        setStage("failed");
+        return;
+      }
+
+      let scan;
+      try {
+        scan = await detectCandidateMoments(signedUrl, { onProgress: (p) => !cancelledRef.current && setScanProgress(p) });
+      } catch (e) {
+        setError(e.message || "Couldn't read the video file.");
+        setStage("failed");
+        return;
+      }
+      if (cancelledRef.current) return;
+      setScanStats(scan);
+
+      if (scan.candidates.length === 0) {
+        setResults([]);
+        setStage("review");
+        return;
+      }
+
+      setStage("analyzing");
+      setAnalyzeProgress({ done: 0, total: scan.candidates.length });
+
+      const video = document.createElement("video");
+      video.crossOrigin = "anonymous";
+      video.preload = "auto";
+      video.src = signedUrl;
+      video.muted = true;
+      await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      const detected = [];
+      const totals = { inputTokens: 0, outputTokens: 0, calls: 0 };
+      for (let i = 0; i < scan.candidates.length; i++) {
+        if (cancelledRef.current) return;
+        const t = scan.candidates[i];
+        try {
+          const preFrame = await grabFrameJpeg(video, canvas, ctx, Math.max(0, t - 0.4));
+          const peakFrame = await grabFrameJpeg(video, canvas, ctx, t);
+          const detection = await detectShotAtMoment([preFrame, peakFrame]);
+          totals.calls += 1;
+          totals.inputTokens += detection.usage.input_tokens || 0;
+          totals.outputTokens += detection.usage.output_tokens || 0;
+          if (detection.isShot) {
+            detected.push({
+              id: uid(),
+              t,
+              thumbnail: peakFrame,
+              outcome: detection.outcome || "Save",
+              zone: detection.zone || "MM",
+              confidence: detection.confidence,
+              reason: detection.reason,
+              included: detection.confidence !== "low",
+            });
+          }
+        } catch (e) {
+          // One failed candidate (network blip, etc.) doesn't abort the
+          // whole scan -- it's just skipped, same spirit as the rest of
+          // this pipeline being a best-effort suggestion pass.
+        }
+        if (!cancelledRef.current) {
+          setAnalyzeProgress({ done: i + 1, total: scan.candidates.length });
+          setUsageTotals({ ...totals });
+        }
+      }
+      if (cancelledRef.current) return;
+      setResults(detected);
+      setStage("review");
+    })();
+    return () => { cancelledRef.current = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function updateResult(id, patch) {
+    setResults(results.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+  function removeResult(id) {
+    setResults(results.filter((r) => r.id !== id));
+  }
+
+  function confirm() {
+    const shots = results
+      .filter((r) => r.included)
+      .map((r) => ({
+        id: uid(),
+        zone: r.zone,
+        outcome: r.outcome,
+        shotType: null,
+        videoTimestamp: formatElapsed(r.t * 1000),
+        shooterNumber: null,
+        position: null,
+      }));
+    onConfirmShots(shots);
+  }
+
+  const estimatedCost = (usageTotals.inputTokens / 1e6) * SONNET_5_INPUT_PER_MTOK + (usageTotals.outputTokens / 1e6) * SONNET_5_OUTPUT_PER_MTOK;
+  const includedCount = results.filter((r) => r.included).length;
+
+  return (
+    <Modal onClose={onClose}>
+      {stage === "scanning" && (
+        <div className="py-8 text-center">
+          <div className="text-sm font-bold mb-2" style={{ color: "#12213A" }}>Scanning video for action…</div>
+          <div className="h-1.5 rounded-full overflow-hidden bg-gray-100 mb-2">
+            <div className="h-full rounded-full" style={{ width: `${Math.round(scanProgress * 100)}%`, background: "#0E8388" }} />
+          </div>
+          <div className="text-xs text-gray-500">Free, local pre-filter — no API calls yet. Can take a minute or two for a full match.</div>
+        </div>
+      )}
+
+      {stage === "analyzing" && (
+        <div className="py-8 text-center">
+          <div className="text-sm font-bold mb-2" style={{ color: "#12213A" }}>
+            Checking moment {analyzeProgress.done} of {analyzeProgress.total}…
+          </div>
+          <div className="h-1.5 rounded-full overflow-hidden bg-gray-100 mb-2">
+            <div className="h-full rounded-full" style={{ width: `${Math.round((analyzeProgress.done / Math.max(1, analyzeProgress.total)) * 100)}%`, background: "#0E8388" }} />
+          </div>
+          <div className="text-xs text-gray-500">Running each flagged moment past Kip's vision — real API cost, tracked below.</div>
+          <div className="text-[11px] font-semibold mt-2" style={{ color: "#68655B" }}>~${estimatedCost.toFixed(3)} so far</div>
+        </div>
+      )}
+
+      {stage === "failed" && (
+        <div className="py-6">
+          <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
+            <AlertTriangle size={13} className="shrink-0 mt-0.5" /> {error}
+          </div>
+          <button onClick={onClose} className="w-full py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Close</button>
+        </div>
+      )}
+
+      {stage === "review" && (
+        <div>
+          <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Suggested shots</h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Nothing is added to the match until you confirm below. {scanStats?.candidates.length || 0} moment{scanStats?.candidates.length !== 1 ? "s" : ""} checked, {results.length} looked like a shot — review and correct each one, or remove it if it isn't.
+          </p>
+          <div className="rounded-lg p-2.5 mb-3 flex items-center justify-between" style={{ background: "#F3F2ED" }}>
+            <div className="text-[11px] font-semibold" style={{ color: "#68655B" }}>Actual cost this scan</div>
+            <div className="text-xs font-black" style={{ color: "#12213A" }}>${estimatedCost.toFixed(3)} · {usageTotals.calls} vision calls</div>
+          </div>
+
+          {results.length === 0 ? (
+            <div className="text-sm text-gray-400 text-center py-6">No shots detected. Either nothing was there, or this approach didn't work well on this footage — worth reporting either way.</div>
+          ) : (
+            <div className="space-y-2 mb-4 max-h-96 overflow-y-auto">
+              {results.map((r) => (
+                <div key={r.id} className="bg-white rounded-lg border p-2.5" style={{ borderColor: r.included ? "#DAD7CC" : "#F0EFEA", opacity: r.included ? 1 : 0.5 }}>
+                  <div className="flex gap-2.5">
+                    <img src={r.thumbnail} alt="" className="w-20 h-12 object-cover rounded-md shrink-0 bg-gray-100" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <div className="text-xs font-bold" style={{ color: "#12213A" }}>{formatElapsed(r.t * 1000)}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded"
+                            style={{
+                              background: r.confidence === "high" ? "#E7F1EC" : r.confidence === "medium" ? "#FBF0DE" : "#FBEAE7",
+                              color: r.confidence === "high" ? "#3B6B5A" : r.confidence === "medium" ? "#8A5714" : "#8F2E23",
+                            }}
+                          >
+                            {r.confidence} confidence
+                          </span>
+                          <IconButton icon={X} size={13} label="Remove suggestion" onClick={() => removeResult(r.id)} color="#C1483B" pad={9} />
+                        </div>
+                      </div>
+                      <div className="flex gap-1 mb-1.5">
+                        {["Save", "Goal"].map((o) => (
+                          <button
+                            key={o}
+                            onClick={() => updateResult(r.id, { outcome: o })}
+                            className="px-2 py-1 rounded text-[11px] font-bold border"
+                            style={r.outcome === o ? { background: o === "Save" ? "#0E8388" : "#C1483B", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC", color: "#12213A" }}
+                          >
+                            {o}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap gap-1 mb-1.5">
+                        {Object.keys(ZONE_LABELS).map((z) => (
+                          <button
+                            key={z}
+                            onClick={() => updateResult(r.id, { zone: z })}
+                            className="w-7 h-7 rounded text-[10px] font-bold border"
+                            style={r.zone === z ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC", color: "#12213A" }}
+                            title={ZONE_LABELS[z]}
+                          >
+                            {z}
+                          </button>
+                        ))}
+                      </div>
+                      {r.reason && <p className="text-[10px] text-gray-400 italic">"{r.reason}"</p>}
+                      <label className="flex items-center gap-1.5 mt-1.5 text-[11px] font-semibold" style={{ color: "#68655B" }}>
+                        <input type="checkbox" checked={r.included} onChange={(e) => updateResult(r.id, { included: e.target.checked })} />
+                        Include this shot
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button onClick={onClose} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Discard</button>
+            <button
+              onClick={confirm}
+              disabled={includedCount === 0}
+              className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
+              style={{ background: "#0E8388" }}
+            >
+              Add {includedCount || ""} shot{includedCount !== 1 ? "s" : ""}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -6142,6 +6728,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
   const [zoneTap, setZoneTap] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [rosterOpen, setRosterOpen] = useState(false);
+  const [showDetection, setShowDetection] = useState(false);
   const zones = emptyZoneMap();
   (match.shots || []).forEach((s) => {
     if (!zones[s.zone]) return;
@@ -6182,7 +6769,27 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
         <SeasonBadge season={match.season} />
       </div>
 
-      <MatchVideoLink match={match} onSave={(videoUrl) => onSave({ ...match, videoUrl })} />
+      <MatchVideoPanel
+        match={match}
+        onSaveVideoUrl={(videoUrl) => onSave({ ...match, videoUrl })}
+        onSaveVideoFile={(videoFile) => onSave({ ...match, videoFile })}
+        onRemoveVideoFile={async () => {
+          if (match.videoFile) { try { await deleteMatchVideo(match.videoFile.path); } catch { /* best-effort */ } }
+          onSave({ ...match, videoFile: null });
+        }}
+        onOpenDetection={() => setShowDetection(true)}
+      />
+
+      {showDetection && match.videoFile && (
+        <VideoShotDetectionFlow
+          match={match}
+          onClose={() => setShowDetection(false)}
+          onConfirmShots={(newShots) => {
+            onSave({ ...match, shots: [...(match.shots || []), ...newShots] });
+            setShowDetection(false);
+          }}
+        />
+      )}
 
       <div className="grid grid-cols-3 gap-2 my-4">
         <div className="bg-white rounded-lg p-2.5 border text-center" style={{ borderColor: "#DAD7CC" }}>
@@ -6215,7 +6822,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
                   {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
                   {s.position && <span className="text-gray-400">· {s.position}</span>}
                   {s.outcome === "Goal" && match.season === "Summer" && (
-                    <span className="text-[10px] font-black" style={{ color: "#8A8779" }}>+{pointsForShot(match.season, s.shotType)}</span>
+                    <span className="text-[10px] font-black" style={{ color: "#68655B" }}>+{pointsForShot(match.season, s.shotType)}</span>
                   )}
                   {s.videoTimestamp && match.videoUrl && (
                     <a href={videoLinkForShot(match.videoUrl, s.videoTimestamp)} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold flex items-center gap-0.5" style={{ color: "#0E8388" }}>
@@ -6223,7 +6830,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
                     </a>
                   )}
                 </div>
-                <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+                <IconButton icon={X} size={13} label="Remove shot" onClick={() => removeShot(s.id)} color="#C1483B" pad={9} />
               </div>
             ))}
           </div>
@@ -6281,7 +6888,7 @@ function MatchWrapUpModal({ match, durationMinutes, onClose, onSave }) {
         <button onClick={() => onSave({ competition, result, durationMinutes })} className="w-full py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
           Save
         </button>
-        <button onClick={() => onSave({ durationMinutes })} className="w-full py-1.5 text-xs font-semibold" style={{ color: "#8A8779" }}>
+        <button onClick={() => onSave({ durationMinutes })} className="w-full py-1.5 text-xs font-semibold" style={{ color: "#68655B" }}>
           Skip for now
         </button>
       </div>
@@ -6449,16 +7056,18 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
             <button
               disabled={teammateWritePending}
               onClick={() => setActiveRecorder("self")}
+              aria-pressed={activeRecorder === "self"}
               className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
-              style={activeRecorder === "self" ? { background: "#12213A", color: "#fff" } : { color: "#8A8779" }}
+              style={activeRecorder === "self" ? { background: "#12213A", color: "#fff" } : { color: "#68655B" }}
             >
               Me
             </button>
             <button
               disabled={!teammateMatch || teammateWritePending}
               onClick={() => setActiveRecorder("teammate")}
+              aria-pressed={activeRecorder === "teammate"}
               className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
-              style={activeRecorder === "teammate" ? { background: "#0E8388", color: "#fff" } : { color: "#8A8779" }}
+              style={activeRecorder === "teammate" ? { background: "#0E8388", color: "#fff" } : { color: "#68655B" }}
             >
               {teammateMatch ? teammateEmail : "Setting up…"}
             </button>
@@ -6491,9 +7100,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
                   {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
                   {s.position && <span className="text-gray-400">· {s.position}</span>}
                   </div>
-                  <button onClick={() => removeShot(s.id)} disabled={teammateWritePending}>
-                    <X size={13} color={teammateWritePending ? "#DAD7CC" : "#C1483B"} />
-                  </button>
+                  <IconButton icon={X} size={13} label="Remove shot" onClick={() => removeShot(s.id)} disabled={teammateWritePending} color={teammateWritePending ? "#DAD7CC" : "#C1483B"} pad={9} />
                 </div>
               ))}
             </div>
@@ -6564,7 +7171,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
             </button>
           </div>
           {deleteStatus === "teammate-failed" && (
-            <button onClick={() => confirmDelete(true)} className="w-full mt-2 py-2 text-xs font-semibold" style={{ color: "#8A8779" }}>
+            <button onClick={() => confirmDelete(true)} className="w-full mt-2 py-2 text-xs font-semibold" style={{ color: "#68655B" }}>
               Delete just my copy
             </button>
           )}
@@ -6643,7 +7250,7 @@ function MatchReviewStep({ match, onSaveMatch, onContinue, onClose }) {
                     {s.shooterNumber && <span className="text-gray-400">· #{s.shooterNumber}</span>}
                     {s.position && <span className="text-gray-400">· {s.position}</span>}
                   </div>
-                  <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+                  <IconButton icon={X} size={13} label="Remove shot" onClick={() => removeShot(s.id)} color="#C1483B" pad={9} />
                 </div>
               ))}
             </div>
@@ -6787,7 +7394,7 @@ function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMa
                   {s.shotType && <span className="text-gray-400">· {s.shotType}</span>}
                   {s.position && <span className="text-gray-400">· {s.position}</span>}
                 </div>
-                <button onClick={() => removeShot(s.id)}><X size={13} color="#C1483B" /></button>
+                <IconButton icon={X} size={13} label="Remove shot" onClick={() => removeShot(s.id)} color="#C1483B" pad={9} />
               </div>
             ))}
           </div>
@@ -6987,7 +7594,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
           >
             <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#fff" }} /> {inProgressMatch ? "Resume recording" : "Record"}
           </button>
-          <button onClick={() => setShowForm(true)} className="p-2 rounded-lg text-white" style={{ background: "#12213A" }}>
+          <button onClick={() => setShowForm(true)} aria-label="Add match" className="p-3 rounded-lg text-white" style={{ background: "#12213A" }}>
             <Plus size={16} />
           </button>
         </div>
@@ -6995,7 +7602,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
 
       <div className="flex gap-1.5 mb-4">
         {["All", "Winter", "Summer"].map((s) => (
-          <Chip key={s} active={filter === s} onClick={() => setFilter(s)} accent={s === "Summer" ? "#E2984B" : s === "Winter" ? "#3B5BA5" : "#12213A"}>
+          <Chip key={s} active={filter === s} onClick={() => setFilter(s)} accent={s === "Summer" ? "#E2984B" : s === "Winter" ? "#3B5BA5" : "#12213A"} activeFg={s === "Summer" ? "#12213A" : "#fff"}>
             {s === "Winter" ? "Indoor" : s === "Summer" ? "Beach" : "All"}
           </Chip>
         ))}
@@ -7007,7 +7614,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
             <BarChart3 size={14} color="#0E8388" /> Reports
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={() => setShowCoachShare(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#8A8779" }}>
+            <button onClick={() => setShowCoachShare(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#68655B" }}>
               <Mail size={12} /> Coach
             </button>
             <button onClick={handleGenerateReport} disabled={generatingReport} className="text-[11px] font-bold disabled:opacity-40" style={{ color: "#0E8388" }}>
@@ -7024,9 +7631,9 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
               <button key={r.id} onClick={() => setOpenReportId(r.id)} className="w-full text-left flex items-center justify-between rounded-md px-2.5 py-2 text-xs" style={{ background: "#F3F2ED" }}>
                 <span className="font-semibold flex items-center gap-1.5" style={{ color: "#12213A" }}>
                   {formatShortDate(r.createdAt.slice(0, 10))} report
-                  {r.sentToCoach && <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#fff", color: "#8A8779" }}>Sent to coach</span>}
+                  {r.sentToCoach && <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded" style={{ background: "#fff", color: "#68655B" }}>Sent to coach</span>}
                 </span>
-                <ChevronRight size={14} color="#8A8779" />
+                <ChevronRight size={14} color="#68655B" />
               </button>
             ))}
           </div>
@@ -7196,7 +7803,7 @@ function ReportDetailModal({ report, profile, onSaveProfile, onClose }) {
         </button>
       </div>
       {report.sentToCoach && (
-        <div className="text-[11px] font-semibold mb-2" style={{ color: "#8A8779" }}>Sent to {report.coachEmail}</div>
+        <div className="text-[11px] font-semibold mb-2" style={{ color: "#68655B" }}>Sent to {report.coachEmail}</div>
       )}
       <p className="text-sm text-gray-700 leading-relaxed mb-4 whitespace-pre-wrap">{report.narrative}</p>
 
@@ -7240,7 +7847,7 @@ function ReportDetailModal({ report, profile, onSaveProfile, onClose }) {
             {d.gymProgress.map((g) => (
               <div key={g.exercise} className="flex items-center justify-between bg-white rounded-md px-2.5 py-1.5 border text-xs" style={{ borderColor: "#DAD7CC" }}>
                 <span>{g.exercise}{g.prCount > 0 ? ` (${g.prCount} PR${g.prCount !== 1 ? "s" : ""})` : ""}</span>
-                <span className="font-bold" style={{ color: g.trend === "up" ? "#0E8388" : g.trend === "down" ? "#C1483B" : "#8A8779" }}>{g.trend}</span>
+                <span className="font-bold" style={{ color: g.trend === "up" ? "#0E8388" : g.trend === "down" ? "#C1483B" : "#68655B" }}>{g.trend}</span>
               </div>
             ))}
           </div>
