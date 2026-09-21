@@ -32,6 +32,8 @@ function getTransporter() {
 }
 
 export async function sendOutboundEmail({ to, subject, text, html }) {
-  const info = await getTransporter().sendMail({ from: SMTP_USER, to, subject, text, html });
+  // Replies (a coach answering an invitation, a keeper answering a Kip email)
+  // go to the monitored support mailbox rather than the SMTP login address.
+  const info = await getTransporter().sendMail({ from: SMTP_USER, replyTo: "hello@keepr.coach", to, subject, text, html });
   return { id: info.messageId, accepted: info.accepted, rejected: info.rejected };
 }

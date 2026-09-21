@@ -25,7 +25,7 @@ export default async (req) => {
   const token = url.searchParams.get("t");
 
   if (!verifyCoachUnsubscribeToken(email, token)) {
-    return new Response(page("Link not valid", "This link is invalid or incomplete. If you're trying to stop Keepr emails, reply to the email you received or contact privacy@keepr.coach and we'll do it for you."), {
+    return new Response(page("Link not valid", "This link is invalid or incomplete. If you're trying to stop Keepr emails, email hello@keepr.coach and we'll do it for you."), {
       status: 400,
       headers: { "Content-Type": "text/html" },
     });
@@ -35,7 +35,7 @@ export default async (req) => {
     await suppressCoachEmail(email);
   } catch (e) {
     console.error("coach-unsubscribe: failed to record suppression", e.message);
-    return new Response(page("Something went wrong", "Couldn't process this just now. Please try again in a moment, or contact privacy@keepr.coach and we'll do it for you."), {
+    return new Response(page("Something went wrong", "Couldn't process this just now. Please try again in a moment, or contact hello@keepr.coach and we'll do it for you."), {
       status: 500,
       headers: { "Content-Type": "text/html" },
     });
