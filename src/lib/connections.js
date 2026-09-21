@@ -26,6 +26,10 @@ export async function regenerateMyInviteCode() {
 export async function redeemInviteCode(code) {
   const { data, error } = await supabase.rpc("redeem_invite_code", { p_code: code.trim().toUpperCase() });
   if (error) throw error;
+  // A wrong code comes back as null rather than an error (so the database can
+  // record the failed attempt for throttling); keep the same "not found"
+  // message the screens already handle.
+  if (!data || !data.id) throw new Error("Invite code not found");
   return data;
 }
 

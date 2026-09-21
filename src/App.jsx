@@ -2842,7 +2842,7 @@ function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, on
     } catch (e) {
       setRedeemStatus({
         ok: false,
-        message: e.message?.includes("not found") ? "That code doesn't match any account." : e.message?.includes("yourself") ? "That's your own code." : "Couldn't send that request.",
+        message: e.message?.includes("not found") ? "That code doesn't match any account." : e.message?.includes("yourself") ? "That's your own code." : e.message?.includes("Too many attempts") ? "Too many attempts. Please wait a while before trying again." : "Couldn't send that request.",
       });
     } finally {
       setRedeeming(false);
@@ -4454,7 +4454,7 @@ function TeammatesSection() {
       setRedeemInput("");
       await refresh();
     } catch (e) {
-      setRedeemError(e.message?.includes("not found") ? "That code doesn't match any account." : e.message?.includes("yourself") ? "That's your own code." : "Couldn't send that request — try again.");
+      setRedeemError(e.message?.includes("not found") ? "That code doesn't match any account." : e.message?.includes("yourself") ? "That's your own code." : e.message?.includes("Too many attempts") ? "Too many attempts. Please wait a while before trying again." : "Couldn't send that request — try again.");
     } finally {
       setRedeeming(false);
     }
