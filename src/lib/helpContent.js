@@ -185,7 +185,7 @@ It's grounded in what you've actually logged — if you haven't logged much yet,
     keywords: ["onboarding", "level", "discipline", "niggles", "weaknesses", "access"],
     body: `Profile has an onboarding section Kip reads from: your level, discipline, optional gender (for grounded sex-specific content, entirely optional), season phase and next competition, how many sessions a week and how long, what you've got access to (court, sand, gym, ball wall, or none of the above), self-identified weaknesses, and any niggles — with severity and whether a physio's cleared them.
 
-None of it's required, but the more that's filled in, the more Kip's suggestions and the data-driven block-building option actually fit your situation instead of being generic. Niggle details never leave your own account — they're excluded from anything shareable, including the coach-sharing feature.`,
+None of it's required, but the more that's filled in, the more Kip's suggestions and the data-driven block-building option actually fit your situation instead of being generic. Niggle details are used by Kip (which runs on an external AI provider, Anthropic) to tailor its advice, and if you've set up Share with coach they can appear in your coach's digest — see "Sharing progress with your coach." They aren't shown to teammates or anyone else.`,
   },
   {
     id: "kip-alerts",
@@ -252,6 +252,8 @@ Emails are sent at most once a day and only when there's something genuinely new
     title: "Sharing progress with your coach",
     keywords: ["coach email", "digest", "send now", "cadence"],
     body: `Profile → "Share with coach" lets you add a coach's email — they don't need a Keepr account, it's just a recipient. You control what's in it: training completion/session logs, match stats, and which sessions you've attended are each independently toggleable (all on by default once you add a coach), and you choose weekly or monthly as the digest cadence.
+
+The three toggles control the numbers and lists in the digest, but the email itself is written from your whole Keepr profile. That means it can also mention any niggles or injuries you've logged (body part, severity, whether a physio has cleared it, and recent rehab notes), your rehab plan and rehab sessions (which count towards attendance), and your gender if you've set it. Those don't have their own switch, so only add a coach you're comfortable sharing that with. Double-check the email address too, since the digest goes to exactly what you type.
 
 "Send now" sends an update immediately regardless of the schedule. Every digest that goes out is also saved to your own Reports, so you can see exactly what your coach received. Removing the coach's email is just as easy as adding it — nothing else changes.`,
   },

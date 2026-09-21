@@ -3675,10 +3675,10 @@ function NiggleDetailModal({ niggle, exercises, plans, onClose, onSave, onApplyP
         </div>
         <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
           <Upload size={13} /> {uploading ? "Uploading…" : "Upload PDF or image"}
-          <input ref={fileInputRef} type="file" accept="application/pdf,image/*" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+          <input ref={fileInputRef} type="file" accept="application/pdf,image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif" className="hidden" onChange={handleFileSelect} disabled={uploading} />
         </label>
         {fileError && <div className="text-[11px] mt-1" style={{ color: "#C1483B" }}>{fileError}</div>}
-        <p className="text-[10px] text-gray-400 mt-1.5">Stored privately — only you can access these. A PDF or image gets read automatically for exercises you can review and add to a block; nothing is scheduled without your confirmation.</p>
+        <p className="text-[10px] text-gray-400 mt-1.5">Stored privately — only you can access these files. A PDF or image is also read automatically by Keepr's AI provider (Anthropic) to suggest exercises you can review and add to a block; nothing is scheduled without your confirmation.</p>
       </div>
 
       <div>
@@ -4200,7 +4200,7 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
         )}
         <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
           <Upload size={13} /> {uploading ? "Uploading…" : "Upload PDF or image"}
-          <input ref={fileInputRef} type="file" accept="application/pdf,image/*" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+          <input ref={fileInputRef} type="file" accept="application/pdf,image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif" className="hidden" onChange={handleFileSelect} disabled={uploading} />
         </label>
         {fileError && <div className="text-[11px] mt-1" style={{ color: "#C1483B" }}>{fileError}</div>}
         <p className="text-[10px] text-gray-400 mt-1.5">A PDF or image gets read automatically for exercises you can review and add to a block; nothing is scheduled without your confirmation.</p>
@@ -4690,7 +4690,10 @@ function CoachSharingSection({ profile, onSaveProfile }) {
       <div className="text-sm font-bold mb-1 flex items-center gap-1.5" style={{ color: "#12213A" }}>
         <Mail size={14} color="#0E8388" /> Share with coach
       </div>
-      <p className="text-xs text-gray-500 mb-3">Send your coach a periodic email digest — they don't need a Keepr account, it's just an email. You choose what's in it.</p>
+      <p className="text-xs text-gray-500 mb-3">Send your coach a periodic email digest — they don't need a Keepr account, it's just an email. You choose which of the items below are in it.</p>
+      <div className="rounded-md px-2.5 py-2 mb-3 text-[11px] leading-snug" style={{ background: "#F3F2ED", color: "#12213A" }}>
+        <span className="font-bold">Heads up:</span> the digest is written from your whole Keepr profile, not just the boxes below. It can also mention any niggles or injuries you've logged (body part, severity, whether a physio has cleared it, recent rehab notes), your rehab plan and rehab sessions, and your gender. Those don't have their own switch, so only add a coach you're happy to share that with.
+      </div>
 
         {!coachEmail ? (
           <div className="flex gap-2">

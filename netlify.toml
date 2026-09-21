@@ -9,6 +9,17 @@
   port = 8888
   autoLaunch = false
 
+# Baseline response headers (security audit H1). Deliberately no
+# Content-Security-Policy yet: it needs to allow Supabase, the YouTube IFrame
+# API/player and blob: video frames, and should be rolled out report-only first.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

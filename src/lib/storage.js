@@ -28,6 +28,10 @@ export async function saveUserData(next) {
 
 const NIGGLE_FILES_BUCKET = "niggle-files";
 const MAX_NIGGLE_FILE_BYTES = 10 * 1024 * 1024;
+// Must match the bucket's allowed_mime_types in migration 0009, which is what
+// actually enforces this; the client check only exists to give a clear message.
+const ALLOWED_NIGGLE_FILE_TYPES = ["application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp", "image/heic", "image/heif"];
+const NIGGLE_FILE_TYPE_ERROR = "Only PDF, JPEG, PNG, GIF, WebP or HEIC files are supported";
 
 // Path is {user_id}/{niggle_id}/{uuid}-{filename} — the RLS policies on this
 // bucket (migration 0002) check only the first segment against auth.uid(),
@@ -36,9 +40,7 @@ export async function uploadNiggleFile(niggleId, file) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("Not signed in");
 
-  const isPdf = file.type === "application/pdf";
-  const isImage = file.type.startsWith("image/");
-  if (!isPdf && !isImage) throw new Error("Only PDF or image files are supported");
+  if (!ALLOWED_NIGGLE_FILE_TYPES.includes(file.type)) throw new Error(NIGGLE_FILE_TYPE_ERROR);
   if (file.size > MAX_NIGGLE_FILE_BYTES) throw new Error("File is too large (10MB max)");
 
   const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
@@ -57,9 +59,7 @@ export async function uploadGeneralFile(file) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("Not signed in");
 
-  const isPdf = file.type === "application/pdf";
-  const isImage = file.type.startsWith("image/");
-  if (!isPdf && !isImage) throw new Error("Only PDF or image files are supported");
+  if (!ALLOWED_NIGGLE_FILE_TYPES.includes(file.type)) throw new Error(NIGGLE_FILE_TYPE_ERROR);
   if (file.size > MAX_NIGGLE_FILE_BYTES) throw new Error("File is too large (10MB max)");
 
   const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
