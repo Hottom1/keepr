@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
+import { authErrorMessage } from "./authErrorMessage.js";
 import AuthLayout from "./AuthLayout.jsx";
 
 export default function LoginPage() {
@@ -18,7 +19,7 @@ export default function LoginPage() {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     setBusy(false);
     if (error) {
-      setError(error.message);
+      setError(authErrorMessage(error));
       return;
     }
     navigate(location.state?.from?.pathname || "/app", { replace: true });

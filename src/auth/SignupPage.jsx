@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
+import { authErrorMessage, MIN_PASSWORD_LENGTH } from "./authErrorMessage.js";
 import AuthLayout from "./AuthLayout.jsx";
 
 export default function SignupPage() {
@@ -23,7 +24,7 @@ export default function SignupPage() {
     const { data, error } = await supabase.auth.signUp({ email, password });
     setBusy(false);
     if (error) {
-      setError(error.message);
+      setError(authErrorMessage(error));
       return;
     }
     if (data.session) {
@@ -67,11 +68,11 @@ export default function SignupPage() {
         <input
           className="auth-input"
           type="password"
-          placeholder="Password"
+          placeholder="Password (8+ characters)"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="new-password"
-          minLength={6}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
         <input
@@ -81,7 +82,7 @@ export default function SignupPage() {
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}
           autoComplete="new-password"
-          minLength={6}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
         <button className="auth-btn" disabled={busy} type="submit">

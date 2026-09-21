@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
+import { authErrorMessage, MIN_PASSWORD_LENGTH } from "./authErrorMessage.js";
 import AuthLayout from "./AuthLayout.jsx";
 
 export default function ResetPasswordPage() {
@@ -36,7 +37,7 @@ export default function ResetPasswordPage() {
     const { error } = await supabase.auth.updateUser({ password });
     setBusy(false);
     if (error) {
-      setError(error.message);
+      setError(authErrorMessage(error));
       return;
     }
     setDone(true);
@@ -67,11 +68,11 @@ export default function ResetPasswordPage() {
         <input
           className="auth-input"
           type="password"
-          placeholder="New password"
+          placeholder="New password (8+ characters)"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="new-password"
-          minLength={6}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
         <input
@@ -81,7 +82,7 @@ export default function ResetPasswordPage() {
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}
           autoComplete="new-password"
-          minLength={6}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
         <button className="auth-btn" disabled={busy} type="submit">
