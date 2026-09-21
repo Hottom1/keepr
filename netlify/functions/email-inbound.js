@@ -5,6 +5,7 @@
 // DECISIONS.md, "Email infrastructure (ImprovMX)" — ImprovMX doesn't sign
 // webhook requests, so a spoofed POST should be able to do no more damage
 // than pre-filling a review screen with junk.
+import { createHash, timingSafeEqual } from "node:crypto";
 import { findUserRowByInboundAlias, appendPendingCalendarSuggestion } from "../lib/supabaseAdmin.js";
 import { parseFirstIcsEvent } from "../lib/icsParser.js";
 import { extractCalendarInfoFromEmail } from "../lib/calendarExtraction.js";
@@ -20,6 +21,21 @@ import { extractCalendarInfoFromEmail } from "../lib/calendarExtraction.js";
 // Match or calendar entry regardless of who sent the request.
 const IMPROVMX_WEBHOOK_IP = "15.237.103.194";
 
+// ImprovMX doesn't sign webhook requests, so authenticity comes from a secret
+// carried in the URL registered with ImprovMX (".../email-inbound?k=<secret>").
+// Enforced only once INBOUND_WEBHOOK_SECRET is set in the Netlify environment,
+// so the rollout order is safe: first add ?k=... to the ImprovMX webhook URL
+// (ignored until the variable exists), then set the variable. Until then the
+// endpoint behaves as before (see the note above about why the IP allowlist is
+// log-only).
+const INBOUND_SECRET = process.env.INBOUND_WEBHOOK_SECRET;
+
+function secretMatches(provided) {
+  const a = createHash("sha256").update(String(provided || "")).digest();
+  const b = createHash("sha256").update(INBOUND_SECRET).digest();
+  return timingSafeEqual(a, b);
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -32,6 +48,10 @@ function guessKindFromTitle(title) {
 export default async (req, context) => {
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405 });
+  }
+
+  if (INBOUND_SECRET && !secretMatches(new URL(req.url).searchParams.get("k"))) {
+    return new Response(JSON.stringify({ error: "Forbidden" }), { status: 403 });
   }
 
   const sourceIp = context.ip || req.headers.get("x-nf-client-connection-ip");

@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { consumeKipQuota } from "../lib/supabaseAdmin.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
@@ -20,6 +21,14 @@ const MAX_MEDIA_BLOCKS = 12;
 // Only Keepr's own client-executed tools (KIP_TOOLS in src/App.jsx). Anything
 // else, notably Anthropic server-side tools that bill per use, is refused.
 const ALLOWED_TOOL_NAMES = new Set(["build_training_block", "get_stats"]);
+// Per-user daily budget (UTC day), counted in the database (migration 0010) so
+// it can't be reset from the client. Calls include every tool-loop round and
+// every shot-detection frame check, so a heavy day of chat plus a full match of
+// detection fits comfortably. The character budget bounds total prompt volume
+// (the whole conversation is resent each call). These are starting values, not
+// measured limits: raise them here if real users ever hit them.
+const DAILY_MAX_CALLS = 600;
+const DAILY_MAX_TEXT_CHARS = 8000000;
 
 function badRequest(message) {
   return new Response(JSON.stringify({ error: message }), { status: 400, headers: { "Content-Type": "application/json" } });
@@ -96,6 +105,17 @@ export default async (req) => {
   }
   if (textChars > MAX_TEXT_CHARS) return badRequest("Request is too large");
   if (mediaBlocks > MAX_MEDIA_BLOCKS) return badRequest("Too many attachments");
+
+  let withinBudget;
+  try {
+    withinBudget = await consumeKipQuota(user.id, textChars, DAILY_MAX_CALLS, DAILY_MAX_TEXT_CHARS);
+  } catch (e) {
+    console.error("kip-chat: quota check failed", e.message);
+    return new Response(JSON.stringify({ error: "Kip is unavailable right now. Please try again shortly." }), { status: 503, headers: { "Content-Type": "application/json" } });
+  }
+  if (!withinBudget) {
+    return new Response(JSON.stringify({ error: "You've reached today's Kip limit. It resets at midnight UTC." }), { status: 429, headers: { "Content-Type": "application/json" } });
+  }
 
   const requestedTokens = Number(maxTokens);
   const maxOutputTokens = Number.isFinite(requestedTokens) && requestedTokens > 0

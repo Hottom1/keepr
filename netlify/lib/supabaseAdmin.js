@@ -109,3 +109,28 @@ export async function setLastCoachDigestSentAt(userId, sentAtIso) {
   const { error } = await getSupabaseAdmin().rpc("set_last_coach_digest_sent", { p_user_id: userId, p_sent_at: sentAtIso });
   if (error) throw error;
 }
+
+// Server-owned counters and opt-outs from migration 0010. Deliberately not
+// stored in the user's own blob: anything in user_data.data is writable by its
+// owner, so a limit kept there could be reset by editing it.
+export async function consumeKipQuota(userId, textChars, maxCalls, maxChars) {
+  const { data, error } = await getSupabaseAdmin().rpc("consume_kip_quota", {
+    p_user_id: userId, p_text_chars: textChars, p_max_calls: maxCalls, p_max_chars: maxChars,
+  });
+  if (error) throw error;
+  return data === true;
+}
+
+// Returns "ok" (and records the send), or "suppressed" / "too_soon" / "daily_limit".
+export async function reserveCoachDigestSend(userId, coachEmail, minGap, maxPerDay) {
+  const { data, error } = await getSupabaseAdmin().rpc("reserve_coach_digest_send", {
+    p_user_id: userId, p_coach_email: coachEmail, p_min_gap: minGap, p_max_per_day: maxPerDay,
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function suppressCoachEmail(email) {
+  const { error } = await getSupabaseAdmin().rpc("suppress_coach_email", { p_email: email });
+  if (error) throw error;
+}

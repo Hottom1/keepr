@@ -20,3 +20,20 @@ export function verifyUnsubscribeToken(userId, token) {
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
 }
+
+// Same HMAC scheme, but keyed on a coach's email address (lowercased) with a
+// "coach:" prefix so a token minted for one purpose can never validate as the
+// other. Lets a coach who isn't a Keepr user stop all Keepr coach emails to
+// their address from the link in every digest.
+export function signCoachUnsubscribeToken(email) {
+  if (!SECRET) throw new Error("UNSUBSCRIBE_SECRET is not configured");
+  return createHmac("sha256", SECRET).update("coach:" + String(email).toLowerCase().trim()).digest("hex");
+}
+
+export function verifyCoachUnsubscribeToken(email, token) {
+  if (!SECRET || !email || !token) return false;
+  const a = Buffer.from(signCoachUnsubscribeToken(email), "hex");
+  const b = Buffer.from(String(token), "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}

@@ -15,7 +15,7 @@ export default async (req) => {
   const due = rows.filter((row) => coachDigestDue((row.data || {}).profile || {}));
 
   const results = await Promise.allSettled(
-    due.map((row) => sendCoachDigestForUser(row.user_id, row.data || {}))
+    due.map((row) => sendCoachDigestForUser(row.user_id, row.data || {}, { mode: "scheduled" }))
   );
   const sent = results.filter((r) => r.status === "fulfilled" && r.value?.sent).length;
   const failed = results.filter((r) => r.status === "rejected").length;

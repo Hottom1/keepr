@@ -6,8 +6,20 @@
 // could drift.
 import { sendOutboundEmail } from "./sendEmail.js";
 import { callKipDirect } from "./callKipDirect.js";
-import { appendReport, setLastCoachDigestSentAt } from "./supabaseAdmin.js";
-import { computeCoachReportData, buildKipSystemPrompt, DEFAULT_EXERCISES, uid } from "../../src/lib/kipDomain.js";
+import { appendReport, setLastCoachDigestSentAt, reserveCoachDigestSend, getUserEmailById } from "./supabaseAdmin.js";
+import { signCoachUnsubscribeToken } from "./unsubscribeToken.js";
+import { computeCoachReportData, buildKipSystemPrompt, DEFAULT_EXERCISES, uid, parseSingleEmail } from "../../src/lib/kipDomain.js";
+
+const SITE_URL = "https://keepr.coach";
+
+// Limits are enforced by the database (migration 0010), per ACCOUNT rather than
+// per address, because profile.coachEmail and lastCoachDigestSentAt live in the
+// user's own writable blob and can't be trusted. A keeper pressing "Send now"
+// gets a few tries a day; the weekly job needs a real gap since the last send.
+const LIMITS = {
+  manual: { minGap: "10 minutes", maxPerDay: 3 },
+  scheduled: { minGap: "5 days", maxPerDay: 1 },
+};
 
 const DEFAULT_CATEGORIES = { trainingLogs: true, matchStats: true, attendance: true };
 
@@ -37,13 +49,22 @@ function windowStartDate(profile) {
   return base.toISOString().slice(0, 10);
 }
 
-// Returns { sent: true } on success, { skipped: reason } if there's nothing
-// to send (no coach email configured). Throws on a real failure (Kip
-// generation or the send itself) — callers decide how to handle that
-// per-user without one failure taking down the whole scheduled run.
-export async function sendCoachDigestForUser(userId, data) {
+// Returns { sent: true } on success, or { skipped: reason } where reason is
+// one of "no_coach_email", "invalid_email", "suppressed", "too_soon",
+// "daily_limit". Throws on a real failure (Kip generation or the send itself)
+// — callers decide how to handle that per-user without one failure taking down
+// the whole scheduled run. `mode` is "manual" (the Send now button) or
+// "scheduled" (the weekly job); it only selects which send limits apply.
+export async function sendCoachDigestForUser(userId, data, { mode = "scheduled" } = {}) {
   const profile = data.profile || {};
-  if (!profile.coachEmail) return { skipped: "no coach email configured" };
+  if (!profile.coachEmail) return { skipped: "no_coach_email" };
+
+  const coachEmail = parseSingleEmail(profile.coachEmail);
+  if (!coachEmail) return { skipped: "invalid_email" };
+
+  const limits = LIMITS[mode] || LIMITS.scheduled;
+  const decision = await reserveCoachDigestSend(userId, coachEmail, limits.minGap, limits.maxPerDay);
+  if (decision !== "ok") return { skipped: decision };
 
   const plans = data.plans || [];
   const matches = data.matches || [];
@@ -60,7 +81,13 @@ export async function sendCoachDigestForUser(userId, data) {
 
   const narrative = await callKipDirect(prompt, "(Coach digest trigger — write the update described in COACH DIGEST CONTEXT.)");
 
-  await sendOutboundEmail({ to: profile.coachEmail, subject: "Keepr training update", text: narrative });
+  // The coach isn't a Keepr user and may never have expected this, so every
+  // digest says who it's from and gives them a one-click way to stop all
+  // Keepr coach emails to their address (honoured by reserveCoachDigestSend).
+  const keeperEmail = await getUserEmailById(userId).catch(() => null);
+  const unsubUrl = `${SITE_URL}/.netlify/functions/coach-unsubscribe?e=${encodeURIComponent(coachEmail.toLowerCase())}&t=${signCoachUnsubscribeToken(coachEmail)}`;
+  const footer = `\n\n—\nThis update was sent from the Keepr account ${keeperEmail || "of a keeper"}, who listed you as their coach. Not expecting it, or don't want these? Stop all Keepr emails to this address: ${unsubUrl}`;
+  await sendOutboundEmail({ to: coachEmail, subject: "Keepr training update", text: narrative + footer });
 
   const report = {
     id: uid(),
@@ -69,7 +96,7 @@ export async function sendCoachDigestForUser(userId, data) {
     data: reportData,
     narrative,
     sentToCoach: true,
-    coachEmail: profile.coachEmail,
+    coachEmail,
   };
   await appendReport(userId, report);
   await setLastCoachDigestSentAt(userId, new Date().toISOString());

@@ -341,6 +341,16 @@ export function buildKipSystemPrompt(profile, plans, season, matches, exercises 
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
+// Exactly one plausible email address, or null. Used for the coach's address on
+// both the client (so a typo is caught immediately) and the server (which must
+// not trust the client): a comma- or semicolon-separated list is rejected
+// because the mailer would otherwise treat it as several recipients.
+export function parseSingleEmail(raw) {
+  const e = String(raw || "").trim();
+  if (e.length > 254 || /[\s,;<>()"'\\]/.test(e)) return null;
+  return /^[^@]+@[^@]+\.[^@]{2,}$/.test(e) ? e : null;
+}
+
 export function phaseFor(weekNum) {
   return PHASES.find((p) => p.weeks.includes(weekNum)) || PHASES[0];
 }

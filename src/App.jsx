@@ -24,7 +24,7 @@ import {
   CATS, GOALS, PHASES, ZONE_GRID, ZONE_LABELS, INDOOR_SHOT_TYPES, BEACH_SHOT_TYPES, BEACH_TWO_POINT_TYPES,
   shotTypesFor, pointsForShot, emptyZoneMap, aggregateMatchStats, aggregateShotTypeStats, POSITIONS, aggregatePositionStats, normalizeOpponentName,
   opponentRecord, findOpponentRoster, upsertOpponentRoster, shooterStats, mostDangerousShooter, parseTimestampToSeconds,
-  videoLinkForShot, extractYouTubeId, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
+  videoLinkForShot, extractYouTubeId, parseSingleEmail, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
   excludedExerciseIdsForNiggles, NEAR_POST_ZONES, LOW_ZONES, EXERCISE_ZONE_MAP, EXERCISE_SHOTTYPE_MAP,
   MATCH_DATA_MIN_MATCHES, MATCH_DATA_MIN_SHOTS, TRAINING_LOG_MIN_SESSIONS, TRAINING_LOG_WINDOW_DAYS,
   weakestZoneSignal, weakestShotTypeSignal, categoryTrainingSignal, isPlateaued, exerciseGenWeight, makeWeightedPicker,
@@ -4636,6 +4636,7 @@ function TeammatesSection() {
 // no separate fetch/refresh state needed.
 function CoachSharingSection({ profile, onSaveProfile }) {
   const [emailInput, setEmailInput] = useState(profile.coachEmail || "");
+  const [emailError, setEmailError] = useState("");
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
 
@@ -4645,9 +4646,15 @@ function CoachSharingSection({ profile, onSaveProfile }) {
 
   function addCoach() {
     if (!emailInput.trim()) return;
+    const email = parseSingleEmail(emailInput);
+    if (!email) {
+      setEmailError("Enter one valid email address for your coach.");
+      return;
+    }
+    setEmailError("");
     onSaveProfile({
       ...profile,
-      coachEmail: emailInput.trim(),
+      coachEmail: email,
       coachShareCategories: profile.coachShareCategories || { trainingLogs: true, matchStats: true, attendance: true },
       coachDigestCadence: profile.coachDigestCadence || "weekly",
     });
@@ -4676,10 +4683,14 @@ function CoachSharingSection({ profile, onSaveProfile }) {
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Send failed");
+      if (!response.ok) {
+        const err = new Error(body.error || "Send failed");
+        err.userFacing = [400, 409, 429].includes(response.status) && !!body.error;
+        throw err;
+      }
       setSendResult({ ok: true, message: "Sent — check with them in a bit." });
     } catch (e) {
-      setSendResult({ ok: false, message: "Couldn't send just now — try again shortly." });
+      setSendResult({ ok: false, message: e.userFacing ? e.message : "Couldn't send just now — try again shortly." });
     } finally {
       setSending(false);
     }
@@ -4696,6 +4707,7 @@ function CoachSharingSection({ profile, onSaveProfile }) {
       </div>
 
         {!coachEmail ? (
+          <>
           <div className="flex gap-2">
             <input
               className="flex-1 rounded-md px-2.5 py-2 text-sm border"
@@ -4703,12 +4715,16 @@ function CoachSharingSection({ profile, onSaveProfile }) {
               placeholder="coach@example.com"
               type="email"
               value={emailInput}
-              onChange={(e) => setEmailInput(e.target.value)}
+              onChange={(e) => { setEmailInput(e.target.value); setEmailError(""); }}
+              aria-invalid={!!emailError}
+              aria-describedby={emailError ? "coach-email-error" : undefined}
             />
             <button disabled={!emailInput.trim()} onClick={addCoach} className="px-3.5 rounded-md text-xs font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
               Add
             </button>
           </div>
+          {emailError && <div id="coach-email-error" role="alert" className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{emailError}</div>}
+          </>
         ) : (
           <>
             <div className="flex items-center justify-between rounded-md px-2.5 py-2 mb-2.5" style={{ background: "#F3F2ED" }}>

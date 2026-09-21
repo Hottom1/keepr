@@ -37,7 +37,18 @@ export default async (req) => {
   }
 
   try {
-    const result = await sendCoachDigestForUser(user.id, row.data);
+    const result = await sendCoachDigestForUser(user.id, row.data, { mode: "manual" });
+    if (result.skipped) {
+      const refusals = {
+        invalid_email: [400, "That doesn't look like a single valid email address. Check your coach's address in Share with coach."],
+        suppressed: [409, "Your coach has asked not to receive Keepr emails, so nothing was sent."],
+        too_soon: [429, "You just sent one. Please wait a few minutes before sending again."],
+        daily_limit: [429, "You've reached today's limit for coach updates. Try again tomorrow."],
+        no_coach_email: [400, "No coach email set"],
+      };
+      const [status, message] = refusals[result.skipped] || [400, "Nothing was sent"];
+      return new Response(JSON.stringify({ error: message }), { status, headers: { "Content-Type": "application/json" } });
+    }
     return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } });
   } catch (e) {
     console.error("send-coach-digest-now: failed for", user.id, e.message);
