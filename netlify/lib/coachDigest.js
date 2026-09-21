@@ -6,7 +6,7 @@
 // could drift.
 import { sendOutboundEmail } from "./sendEmail.js";
 import { callKipDirect } from "./callKipDirect.js";
-import { appendReport, setLastCoachDigestSentAt, reserveCoachDigestSend, getUserEmailById } from "./supabaseAdmin.js";
+import { appendReport, setLastCoachDigestSentAt, reserveCoachDigestSend, getUserEmailById, getCoachConsentStatus } from "./supabaseAdmin.js";
 import { signCoachUnsubscribeToken } from "./unsubscribeToken.js";
 import { computeCoachReportData, buildKipSystemPrompt, DEFAULT_EXERCISES, uid, parseSingleEmail } from "../../src/lib/kipDomain.js";
 
@@ -50,8 +50,8 @@ function windowStartDate(profile) {
 }
 
 // Returns { sent: true } on success, or { skipped: reason } where reason is
-// one of "no_coach_email", "invalid_email", "suppressed", "too_soon",
-// "daily_limit". Throws on a real failure (Kip generation or the send itself)
+// one of "no_coach_email", "invalid_email", "unconfirmed", "suppressed",
+// "too_soon", "daily_limit". Throws on a real failure (Kip generation or the send itself)
 // — callers decide how to handle that per-user without one failure taking down
 // the whole scheduled run. `mode` is "manual" (the Send now button) or
 // "scheduled" (the weekly job); it only selects which send limits apply.
@@ -61,6 +61,13 @@ export async function sendCoachDigestForUser(userId, data, { mode = "scheduled" 
 
   const coachEmail = parseSingleEmail(profile.coachEmail);
   if (!coachEmail) return { skipped: "invalid_email" };
+
+  // Nothing is ever sent to an address the coach hasn't confirmed themselves
+  // (see coach-consent.js / coach-confirm.js). The confirmation is server-side
+  // state keyed by this keeper and address, not something in the profile.
+  const consent = await getCoachConsentStatus(userId, coachEmail);
+  if (consent === "stopped") return { skipped: "suppressed" };
+  if (consent !== "confirmed") return { skipped: "unconfirmed" };
 
   const limits = LIMITS[mode] || LIMITS.scheduled;
   const decision = await reserveCoachDigestSend(userId, coachEmail, limits.minGap, limits.maxPerDay);

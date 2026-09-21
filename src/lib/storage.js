@@ -26,6 +26,16 @@ export async function saveUserData(next) {
   return true;
 }
 
+// Uploads are also refused by the database once an account holds its storage
+// quota (migration 0014); Supabase reports that as a row-level-security
+// violation, which means nothing to a keeper.
+function uploadError(error) {
+  if (/row-level security|violates/i.test(error.message || "")) {
+    return new Error("You've reached your storage limit. Delete some files to make room.");
+  }
+  return error;
+}
+
 const NIGGLE_FILES_BUCKET = "niggle-files";
 const MAX_NIGGLE_FILE_BYTES = 10 * 1024 * 1024;
 // Must match the bucket's allowed_mime_types in migration 0009, which is what
@@ -47,7 +57,7 @@ export async function uploadNiggleFile(niggleId, file) {
   const path = `${user.id}/${niggleId}/${crypto.randomUUID()}-${safeName}`;
 
   const { error } = await supabase.storage.from(NIGGLE_FILES_BUCKET).upload(path, file, { upsert: false });
-  if (error) throw error;
+  if (error) throw uploadError(error);
 
   return { path, name: file.name, mimeType: file.type, size: file.size, uploadedAt: new Date().toISOString() };
 }
@@ -66,7 +76,7 @@ export async function uploadGeneralFile(file) {
   const path = `${user.id}/general/${crypto.randomUUID()}-${safeName}`;
 
   const { error } = await supabase.storage.from(NIGGLE_FILES_BUCKET).upload(path, file, { upsert: false });
-  if (error) throw error;
+  if (error) throw uploadError(error);
 
   return { path, name: file.name, mimeType: file.type, size: file.size, uploadedAt: new Date().toISOString() };
 }
@@ -109,7 +119,7 @@ export async function uploadMatchVideo(matchId, file) {
   const path = `${user.id}/${matchId}/${crypto.randomUUID()}-${safeName}`;
 
   const { error } = await supabase.storage.from(MATCH_VIDEOS_BUCKET).upload(path, file, { upsert: false });
-  if (error) throw error;
+  if (error) throw uploadError(error);
 
   return { path, name: file.name, mimeType: file.type, size: file.size, uploadedAt: new Date().toISOString() };
 }

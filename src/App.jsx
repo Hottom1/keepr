@@ -15,6 +15,7 @@ import {
   revokeConnection, setRecordingPermission, getMyConnections, summarizeConnections, partnerOf, myOutgoingGrant,
   createOrResumeTeammateMatch, patchTeammateMatch, deleteTeammateMatch,
 } from "./lib/connections.js";
+import { coachConsent } from "./lib/coachConsent.js";
 import { supabase } from "./lib/supabaseClient.js";
 import { HELP_CATEGORIES, searchHelpArticles, articlesByCategory, findHelpArticle } from "./lib/helpContent.js";
 import { useAuth } from "./auth/AuthProvider.jsx";
@@ -4639,8 +4640,44 @@ function CoachSharingSection({ profile, onSaveProfile }) {
   const [emailError, setEmailError] = useState("");
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
+  // Whether this coach has confirmed they want the emails. Kept on the server,
+  // not in the profile: null while loading, else "none" | "pending" | "confirmed" | "stopped".
+  const [consent, setConsent] = useState(null);
+  const [inviting, setInviting] = useState(false);
+  const [consentMessage, setConsentMessage] = useState("");
 
   const coachEmail = profile.coachEmail || "";
+
+  async function refreshConsent() {
+    if (!coachEmail) return;
+    try { setConsent(await coachConsent("status", coachEmail)); } catch { /* leave the last known state */ }
+  }
+
+  useEffect(() => {
+    setConsent(null);
+    if (!coachEmail) return undefined;
+    let cancelled = false;
+    coachConsent("status", coachEmail)
+      .then((status) => { if (!cancelled) setConsent((prev) => (prev === null ? status : prev)); })
+      .catch(() => { if (!cancelled) setConsent((prev) => (prev === null ? "none" : prev)); });
+    // The coach confirms on another device, so re-check when the keeper comes back to this tab.
+    const onVisible = () => { if (document.visibilityState === "visible") refreshConsent(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coachEmail]);
+
+  async function sendInvite(email = coachEmail) {
+    setInviting(true);
+    setConsentMessage("");
+    try {
+      setConsent(await coachConsent("invite", email));
+    } catch (e) {
+      setConsentMessage(e.userFacing ? e.message : "Couldn't send the invitation just now. Try again shortly.");
+    } finally {
+      setInviting(false);
+    }
+  }
   const categories = profile.coachShareCategories || { trainingLogs: true, matchStats: true, attendance: true };
   const cadence = profile.coachDigestCadence || "weekly";
 
@@ -4658,6 +4695,7 @@ function CoachSharingSection({ profile, onSaveProfile }) {
       coachShareCategories: profile.coachShareCategories || { trainingLogs: true, matchStats: true, attendance: true },
       coachDigestCadence: profile.coachDigestCadence || "weekly",
     });
+    sendInvite(email);
   }
 
   function removeCoach() {
@@ -4732,6 +4770,26 @@ function CoachSharingSection({ profile, onSaveProfile }) {
               <button onClick={removeCoach} className="text-[11px] font-semibold shrink-0" style={{ color: "#C1483B" }}>Remove</button>
             </div>
 
+            {consent !== null && (
+              <div className="rounded-md px-2.5 py-2 mb-3 text-[11px] leading-snug" style={{ background: "#F3F2ED", color: "#12213A" }} role="status">
+                {consent === "confirmed" && <span className="font-bold" style={{ color: "#0E8388" }}>Confirmed. Your coach has agreed to receive these.</span>}
+                {consent === "pending" && <><span className="font-bold">Waiting for your coach to confirm.</span> We've emailed them a link. Nothing is sent to them until they press its button.</>}
+                {consent === "none" && <><span className="font-bold">Your coach hasn't been invited yet.</span> Nothing is sent until they confirm.</>}
+                {consent === "stopped" && <span className="font-bold" style={{ color: "#C1483B" }}>This address has asked not to receive Keepr emails, so nothing will be sent to it.</span>}
+                {(consent === "pending" || consent === "none") && (
+                  <div className="flex gap-2 mt-2">
+                    <button disabled={inviting} onClick={() => sendInvite()} className="px-2.5 py-1.5 rounded-md text-[11px] font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+                      {inviting ? "Sending…" : consent === "none" ? "Send invitation" : "Resend invitation"}
+                    </button>
+                    {consent === "pending" && (
+                      <button onClick={refreshConsent} className="px-2.5 py-1.5 rounded-md text-[11px] font-bold border" style={{ borderColor: "#DAD7CC" }}>Check again</button>
+                    )}
+                  </div>
+                )}
+                {consentMessage && <div className="font-semibold mt-1.5" style={{ color: "#C1483B" }}>{consentMessage}</div>}
+              </div>
+            )}
+
             <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Include</div>
             <div className="space-y-1.5 mb-3">
               {COACH_SHARE_CATEGORIES.map((cat) => {
@@ -4764,9 +4822,12 @@ function CoachSharingSection({ profile, onSaveProfile }) {
               ))}
             </div>
 
-            <button disabled={sending} onClick={sendNow} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
+            <button disabled={sending || consent !== "confirmed"} onClick={sendNow} className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>
               {sending ? "Sending…" : "Send now"}
             </button>
+            {consent !== null && consent !== "confirmed" && (
+              <div className="text-[10px] text-gray-400 mt-1.5 text-center">Send now unlocks once your coach confirms.</div>
+            )}
             {sendResult && (
               <div className="text-[11px] font-semibold mt-1.5 text-center" style={{ color: sendResult.ok ? "#0E8388" : "#C1483B" }}>{sendResult.message}</div>
             )}

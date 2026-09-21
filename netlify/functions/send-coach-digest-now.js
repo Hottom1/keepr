@@ -40,6 +40,7 @@ export default async (req) => {
     const result = await sendCoachDigestForUser(user.id, row.data, { mode: "manual" });
     if (result.skipped) {
       const refusals = {
+        unconfirmed: [409, "Your coach hasn't confirmed yet. Ask them to open the email we sent (you can resend it from Share with coach)."],
         invalid_email: [400, "That doesn't look like a single valid email address. Check your coach's address in Share with coach."],
         suppressed: [409, "Your coach has asked not to receive Keepr emails, so nothing was sent."],
         too_soon: [429, "You just sent one. Please wait a few minutes before sending again."],

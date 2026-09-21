@@ -139,3 +139,24 @@ export async function suppressCoachEmail(email) {
   const { error } = await getSupabaseAdmin().rpc("suppress_coach_email", { p_email: email });
   if (error) throw error;
 }
+
+// Coach consent (migration 0013). tokenHash is the sha256 of a random token that
+// only ever appears in the emailed link; the database never sees the token.
+export async function requestCoachInvite(userId, coachEmail, tokenHash) {
+  const { data, error } = await getSupabaseAdmin().rpc("request_coach_invite", { p_user_id: userId, p_coach_email: coachEmail, p_token_hash: tokenHash });
+  if (error) throw error;
+  return data;
+}
+
+export async function confirmCoachInvite(id, tokenHash) {
+  const { data, error } = await getSupabaseAdmin().rpc("confirm_coach_invite", { p_id: id, p_token_hash: tokenHash });
+  if (error) throw error;
+  return data === true;
+}
+
+// "none" | "pending" | "confirmed" | "stopped"
+export async function getCoachConsentStatus(userId, coachEmail) {
+  const { data, error } = await getSupabaseAdmin().rpc("get_coach_consent_status", { p_user_id: userId, p_coach_email: coachEmail });
+  if (error) throw error;
+  return data;
+}
