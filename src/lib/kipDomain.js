@@ -341,6 +341,28 @@ export function buildKipSystemPrompt(profile, plans, season, matches, exercises 
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
+// The stored Kip conversation is never trimmed, but the model only needs the
+// recent part of it: the system prompt already carries the profile, plans and
+// stats. Sending the whole thread made every call more expensive as it grew,
+// and would eventually run into kip-chat's per-request size cap and daily
+// budget. Keeps the newest messages that fit both limits, always including the
+// last one, and never starts the window on an assistant turn.
+export const KIP_HISTORY_MAX_MESSAGES = 40;
+export const KIP_HISTORY_MAX_CHARS = 40000;
+export function recentMessagesForModel(messages, { maxMessages = KIP_HISTORY_MAX_MESSAGES, maxChars = KIP_HISTORY_MAX_CHARS } = {}) {
+  const all = messages || [];
+  const kept = [];
+  let chars = 0;
+  for (let i = all.length - 1; i >= 0 && kept.length < maxMessages; i--) {
+    const len = typeof all[i].content === "string" ? all[i].content.length : JSON.stringify(all[i].content || "").length;
+    if (kept.length > 0 && chars + len > maxChars) break;
+    kept.unshift(all[i]);
+    chars += len;
+  }
+  while (kept.length > 1 && kept[0].role !== "user") kept.shift();
+  return kept;
+}
+
 // Exactly one plausible email address, or null. Used for the coach's address on
 // both the client (so a typo is caught immediately) and the server (which must
 // not trust the client): a comma- or semicolon-separated list is rejected

@@ -9,9 +9,13 @@
   port = 8888
   autoLaunch = false
 
-# Baseline response headers (security audit H1). Deliberately no
-# Content-Security-Policy yet: it needs to allow Supabase, the YouTube IFrame
-# API/player and blob: video frames, and should be rolled out report-only first.
+# Response headers (security audit H1).
+# The CSP is deliberately Report-Only for now: it logs what it WOULD block to
+# the browser console without blocking anything, so it can be exercised against
+# the real app before being switched to enforcing. What the app legitimately
+# loads: its own bundle, the YouTube IFrame API and player, Supabase (REST,
+# auth, storage, signed image/video URLs) and blob:/data: for video frames.
+# Inline styles are needed (React style attributes and a few <style> tags).
 [[headers]]
   for = "/*"
   [headers.values]
@@ -19,6 +23,7 @@
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Content-Security-Policy-Report-Only = "default-src 'self'; script-src 'self' https://www.youtube.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; frame-src https://www.youtube.com https://www.youtube-nocookie.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 [[redirects]]
   from = "/*"

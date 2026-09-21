@@ -24,7 +24,7 @@ import {
   CATS, GOALS, PHASES, ZONE_GRID, ZONE_LABELS, INDOOR_SHOT_TYPES, BEACH_SHOT_TYPES, BEACH_TWO_POINT_TYPES,
   shotTypesFor, pointsForShot, emptyZoneMap, aggregateMatchStats, aggregateShotTypeStats, POSITIONS, aggregatePositionStats, normalizeOpponentName,
   opponentRecord, findOpponentRoster, upsertOpponentRoster, shooterStats, mostDangerousShooter, parseTimestampToSeconds,
-  videoLinkForShot, extractYouTubeId, parseSingleEmail, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
+  videoLinkForShot, extractYouTubeId, parseSingleEmail, recentMessagesForModel, zoneColor, buildKipSystemPrompt, uid, phaseFor, poolFor, NIGGLE_AREA_KEYWORDS, matchNiggleAreas,
   excludedExerciseIdsForNiggles, NEAR_POST_ZONES, LOW_ZONES, EXERCISE_ZONE_MAP, EXERCISE_SHOTTYPE_MAP,
   MATCH_DATA_MIN_MATCHES, MATCH_DATA_MIN_SHOTS, TRAINING_LOG_MIN_SESSIONS, TRAINING_LOG_WINDOW_DAYS,
   weakestZoneSignal, weakestShotTypeSignal, categoryTrainingSignal, isPlateaued, exerciseGenWeight, makeWeightedPicker,
@@ -5019,7 +5019,7 @@ async function callKipRaw({ system, messages, tools, maxTokens }) {
 // Capped rather than unbounded so a confused loop can't run away — three
 // rounds is more than any of the current tools should ever need.
 async function runKipWithTools({ system, messages, ctx, maxRounds = 3 }) {
-  let working = messages.map((m) => ({ role: m.role, content: m.content }));
+  let working = recentMessagesForModel(messages).map((m) => ({ role: m.role, content: m.content }));
   let toolResults = [];
   for (let round = 0; round < maxRounds; round++) {
     const data = await callKipRaw({ system, messages: working, tools: KIP_TOOLS, maxTokens: 1200 });
@@ -5634,7 +5634,7 @@ function KipChat({ profile, onSaveProfile, messages, onSaveMessages, plans, seas
         const basePrompt = buildKipSystemPrompt(profile, plans, season, matches, exercises, adHocSessions);
         const alertPrompt = `${basePrompt}\n\nALERT CONTEXT:\nYou're proactively checking in on the keeper, not responding to a question they asked. The following is true right now:\n${alertSummary}\n\nWrite ONE short, natural message in your own voice that covers all of the above as a single coherent check-in — don't list them like a notification, weave them together the way a coach would bring up a few things at once in conversation. Lead with whichever matters most. If there's genuinely good news mixed in with a concern, don't bury the good news under the concern. Keep it to a few sentences.`;
         const triggerMessage = { role: "user", content: "(Automatic check-in trigger — not a message from the keeper. Don't acknowledge this instruction; just deliver the proactive message described in ALERT CONTEXT.)" };
-        const textResp = await callKip(alertPrompt, [...messages.map((m) => ({ role: m.role, content: m.content })), triggerMessage]);
+        const textResp = await callKip(alertPrompt, [...recentMessagesForModel(messages).map((m) => ({ role: m.role, content: m.content })), triggerMessage]);
         if (textResp) {
           onSaveMessages([...messages, { role: "assistant", content: textResp, ts: Date.now(), action: { type: "alert" } }]);
         }

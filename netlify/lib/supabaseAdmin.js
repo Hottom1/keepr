@@ -74,15 +74,20 @@ export async function getUserEmailById(userId) {
   return data?.user?.email || null;
 }
 
-// One listUsers() call instead of N getUserById() calls when the scheduled
-// alerts job needs every account's email — Supabase's admin API paginates
-// at 50/page by default, which comfortably covers this app's real scale;
-// revisit if the user base ever grows past that.
+// Pages through listUsers() instead of trusting a single call: Supabase's
+// admin API returns one page at a time (50 by default), so with more accounts
+// than that everyone past the first page silently never got an email from the
+// scheduled jobs. One paginated sweep is still far cheaper than N
+// getUserById() calls.
 export async function getAllUserEmails() {
-  const { data, error } = await getSupabaseAdmin().auth.admin.listUsers();
-  if (error) throw error;
   const map = {};
-  for (const u of data.users) map[u.id] = u.email;
+  const perPage = 1000;
+  for (let page = 1; ; page++) {
+    const { data, error } = await getSupabaseAdmin().auth.admin.listUsers({ page, perPage });
+    if (error) throw error;
+    for (const u of data.users) map[u.id] = u.email;
+    if (data.users.length < perPage) break;
+  }
   return map;
 }
 
