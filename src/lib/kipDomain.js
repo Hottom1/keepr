@@ -126,6 +126,106 @@ export function aggregatePositionStats(matches) {
   return map;
 }
 
+// Training shots, unlike match shots, don't live in one flat array — a shot
+// can be logged against a session as a whole (plans[].weeks[].sessions[].
+// shots, or adHocSessions[].shots) or against a specific Partner/Team
+// exercise within it (a plan entry's own .shots, or an ad-hoc session's
+// .exerciseShots[exerciseId]). This walks both sources and both levels and
+// pools them into one flat list of "training records" — one per named/
+// logged session, `{ season, shots }` shaped exactly like a match, so
+// aggregateShotTypeStats/aggregatePositionStats above work on it completely
+// unchanged. Session-level and exercise-level shots for the SAME session are
+// pooled together here: a shot the keeper faced during training is one shot
+// regardless of which granularity they chose to log it at (see DECISIONS.md,
+// "Training shot stats & detection" — this is not the match/training
+// blending the audit flagged, which was two different, non-comparable
+// contexts; this is one context logged at two levels of detail).
+export function buildTrainingShotRecords({ plans = [], adHocSessions = [] } = {}) {
+  const records = [];
+  plans.forEach((plan) => {
+    (plan.weeks || []).forEach((week) => {
+      (week.sessions || []).forEach((session) => {
+        const exerciseShots = (session.exercises || []).flatMap((e) => e.shots || []);
+        const shots = [...(session.shots || []), ...exerciseShots];
+        if (shots.length === 0 && !session.title) return;
+        records.push({
+          id: `plan:${session.sessionId}`, kind: "plan", planId: plan.id, weekId: week.weekId, sessionId: session.sessionId,
+          name: session.title || `Session ${session.sessionNumber}`,
+          date: session.date || (session.completedAt ? session.completedAt.slice(0, 10) : null),
+          season: plan.season,
+          shots,
+        });
+      });
+    });
+  });
+  (adHocSessions || []).forEach((session) => {
+    const exerciseShots = Object.values(session.exerciseShots || {}).flat();
+    const shots = [...(session.shots || []), ...exerciseShots];
+    if (shots.length === 0 && !session.title) return;
+    records.push({
+      id: `adhoc:${session.id}`, kind: "adhoc", sessionId: session.id,
+      name: session.title || "Training session",
+      date: session.date || (session.completedAt ? session.completedAt.slice(0, 10) : null),
+      season: session.season,
+      shots,
+    });
+  });
+  return records;
+}
+
+// Same shape as aggregateMatchStats, deliberately — same headline numbers,
+// same GoalGrid-ready zone map — but the trend is keyed by session name, not
+// opponent, since there's no opponent axis for training. Kept as a genuinely
+// separate function rather than a shared one with a flag: these two already
+// diverge (no opponent, no per-shooter breakdown), and a shared function
+// with branching would be worse than two small clear ones.
+export function aggregateTrainingStats(records, seasonFilter) {
+  const zones = emptyZoneMap();
+  let totalSaves = 0, totalGoals = 0, totalPoints = 0;
+  const trend = [];
+  records
+    .filter((r) => seasonFilter === "All" || r.season === seasonFilter)
+    .sort((a, b) => new Date(a.date || 0) - new Date(b.date || 0))
+    .forEach((r) => {
+      let rSaves = 0, rShots = 0;
+      (r.shots || []).forEach((s) => {
+        const z = zones[s.zone];
+        if (!z) return;
+        rShots++;
+        if (s.outcome === "Save") {
+          z.saves++; totalSaves++; rSaves++;
+        } else {
+          z.goals++; totalGoals++;
+          const pts = pointsForShot(r.season, s.shotType);
+          z.points += pts; totalPoints += pts;
+        }
+      });
+      if (rShots > 0 && r.date) trend.push({ date: r.date, sessionName: r.name, savePct: Math.round((rSaves / rShots) * 100) });
+    });
+  return { zones, totalSaves, totalGoals, totalPoints, trend };
+}
+
+// The fine-grained view item 2 asks for on top of the pooled headline
+// numbers above: save% per DRILL, across every session it was ever logged
+// in. Only exercise-level shots count here — a session-level "overall"
+// entry isn't tied to any one drill, so it has nothing to contribute to a
+// per-drill breakdown.
+export function aggregateTrainingByDrill({ plans = [], adHocSessions = [] } = {}) {
+  const map = {};
+  const add = (exerciseId, shots) => {
+    if (!shots || shots.length === 0) return;
+    if (!map[exerciseId]) map[exerciseId] = { saves: 0, goals: 0 };
+    shots.forEach((s) => { if (s.outcome === "Save") map[exerciseId].saves++; else map[exerciseId].goals++; });
+  };
+  plans.forEach((plan) => (plan.weeks || []).forEach((week) => (week.sessions || []).forEach((session) => {
+    (session.exercises || []).forEach((entry) => add(entry.exerciseId, entry.shots));
+  })));
+  (adHocSessions || []).forEach((session) => {
+    Object.entries(session.exerciseShots || {}).forEach(([exerciseId, shots]) => add(exerciseId, shots));
+  });
+  return map;
+}
+
 // Shared key for anything grouped by opponent name — matches, opponent
 // records, and the roster below all key off this exact normalization so a
 // team is recognized as "the same opponent" regardless of casing/whitespace.
@@ -319,6 +419,22 @@ export function buildKipSystemPrompt(profile, plans, season, matches, exercises 
       return `Season save rate: ${savePct}% across ${agg.totalSaves + agg.totalGoals} shots logged. Weakest zone: ${ZONE_LABELS[weakest[0]]} (${weakest[1].saves}/${weakest[1].saves + weakest[1].goals} saved).`;
     })(),
     "",
+    // A separate figure, deliberately never averaged or combined with match
+    // save rate above — training shots come from drills and reps against a
+    // partner or teammate, not real match pressure, so the two numbers
+    // aren't measuring the same thing (same non-comparability principle as
+    // never blending Winter/Summer scoring together).
+    "TRAINING STATS (separate from match stats above — different context, never combine the two):",
+    (() => {
+      const records = buildTrainingShotRecords({ plans, adHocSessions });
+      const agg = aggregateTrainingStats(records, season);
+      if (agg.totalSaves + agg.totalGoals === 0) return "No training shots logged yet for the current season.";
+      const zoneEntries = Object.entries(agg.zones).filter(([, z]) => z.saves + z.goals > 0);
+      const weakest = zoneEntries.sort((a, b) => (a[1].saves / (a[1].saves + a[1].goals)) - (b[1].saves / (b[1].saves + b[1].goals)))[0];
+      const savePct = Math.round((agg.totalSaves / (agg.totalSaves + agg.totalGoals)) * 100);
+      return `Training save rate: ${savePct}% across ${agg.totalSaves + agg.totalGoals} shots logged in training. Weakest zone in training: ${ZONE_LABELS[weakest[0]]} (${weakest[1].saves}/${weakest[1].saves + weakest[1].goals} saved).`;
+    })(),
+    "",
     "GYM TRAINING LOG:",
     (() => {
       const summaries = [...loggedGymExerciseIds(plans, adHocSessions)].map((id) => {
@@ -340,6 +456,13 @@ export function buildKipSystemPrompt(profile, plans, season, matches, exercises 
 }
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
+
+// A plan session only gets a real name if the keeper set one (at live-start,
+// or editing it later) — otherwise it falls back to its position in the
+// block, exactly as every screen already displayed it before names existed.
+export function planSessionName(session) {
+  return session.title || `Session ${session.sessionNumber}`;
+}
 
 // The stored Kip conversation is never trimmed, but the model only needs the
 // recent part of it: the system prompt already carries the profile, plans and
@@ -1399,6 +1522,19 @@ export function computeReportData({ matches, plans, adHocSessions, exercises, se
     .map(([zone, z]) => ({ zone, label: ZONE_LABELS[zone], savePct: Math.round((z.saves / (z.saves + z.goals)) * 100), shots: z.saves + z.goals }));
   const weakestZones = [...zoneEntries].sort((a, b) => a.savePct - b.savePct).slice(0, 3);
 
+  // Deliberately separate fields, never blended into overallSavePct/
+  // weakestZones above — training shots aren't match shots (see
+  // buildKipSystemPrompt's TRAINING STATS comment for why). A report with no
+  // training shots logged just won't show this section (trainingShots stays
+  // 0), same "don't pad with nothing" convention as the rest of this report.
+  const trainingRecords = buildTrainingShotRecords({ plans, adHocSessions });
+  const trainingAgg = aggregateTrainingStats(trainingRecords, season);
+  const trainingTotalShots = trainingAgg.totalSaves + trainingAgg.totalGoals;
+  const trainingZoneEntries = Object.entries(trainingAgg.zones)
+    .filter(([, z]) => z.saves + z.goals > 0)
+    .map(([zone, z]) => ({ zone, label: ZONE_LABELS[zone], savePct: Math.round((z.saves / (z.saves + z.goals)) * 100), shots: z.saves + z.goals }));
+  const trainingWeakestZones = [...trainingZoneEntries].sort((a, b) => a.savePct - b.savePct).slice(0, 3);
+
   const completed = completedSessionsWithMeta(plans);
   const totalSessionsInPlans = plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.length, 0), 0);
   const completionRate = totalSessionsInPlans > 0 ? Math.round((completed.length / totalSessionsInPlans) * 100) : null;
@@ -1426,6 +1562,10 @@ export function computeReportData({ matches, plans, adHocSessions, exercises, se
     totalShots,
     weakestZones,
     saveTrend: agg.trend.slice(-10),
+    trainingSavePct: trainingTotalShots > 0 ? Math.round((trainingAgg.totalSaves / trainingTotalShots) * 100) : null,
+    trainingShots: trainingTotalShots,
+    trainingWeakestZones,
+    trainingSaveTrend: trainingAgg.trend.slice(-10),
     completionRate,
     sessionsCompleted: completed.length,
     totalSessionsInPlans,
