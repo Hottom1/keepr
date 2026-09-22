@@ -2,82 +2,140 @@ import LegalLayout from "./LegalLayout.jsx";
 
 export default function TermsOfService() {
   return (
-    <LegalLayout title="Terms of Service" updated="August 1, 2026">
-      <p>
-        These terms cover your use of Keepr. By creating an account, you agree to them. They're written
-        in plain language on purpose. If something's unclear, contact us before you rely on it.
-      </p>
+    <LegalLayout title="Terms of Service" updated="September 22, 2026">
+      <div>
+        <h2 className="legal-h2">Who this applies to</h2>
+        <p>These terms govern your use of Keepr, operated by Thomas Roxburgh, based in South Street,
+        Edgecliff, Sydney, New South Wales, Australia. By creating an account, you agree to them. You must
+        be at least 16 years old to use Keepr.</p>
+      </div>
 
       <div>
         <h2 className="legal-h2">What Keepr is</h2>
-        <p>Keepr is a training app for handball and beach handball goalkeepers: a drill library, a
-        6-week training block builder, match stat tracking, and Kip, an AI coach that gives training
-        suggestions based on your profile and activity in the app.</p>
+        <p>Keepr is a training tool for handball and beach handball goalkeepers: an exercise library, a
+        training block builder, match statistics, and an AI coach ("Kip").</p>
+      </div>
+
+      <div>
+        <h2 className="legal-h2">Kip is not a medical professional</h2>
+        <p>Kip does not diagnose injuries and will not advise training through real pain — it is
+        explicitly instructed to direct anything beyond mild soreness to a physio or doctor. Keepr is not
+        a substitute for professional medical, physiotherapy, or coaching advice. Nothing in the app,
+        including anything Kip says, should be treated as medical or professional advice. If you are
+        dealing with a real injury, consult a qualified professional rather than relying on the app.</p>
       </div>
 
       <div>
         <h2 className="legal-h2">Your account</h2>
-        <p>You're responsible for keeping your login details secure and for anything that happens
-        under your account. Use a real email address you control, and let us know if you think your
-        account's been compromised.</p>
+        <p>You're responsible for keeping your login credentials secure and for activity that occurs
+        under your account. Tell us promptly if you suspect unauthorized access.</p>
+      </div>
+
+      <div>
+        <h2 className="legal-h2">Pricing — currently free</h2>
+        <p>Keepr is currently free to use. If a paid subscription tier is introduced in future, these
+        terms will be updated to name the price, trial terms, payment provider, and cancellation policy
+        before that tier launches, and existing users will be notified before any change affects them.</p>
+      </div>
+
+      <div>
+        <h2 className="legal-h2">Teammate connections and shared data</h2>
+        <p>If you connect with a teammate using an invite code, you're both agreeing that a recording made
+        "for" the other person writes match data directly into their account. This requires both people to
+        accept the connection, and either person can revoke it at any time. Revoking a connection stops
+        future data-sharing but does not remove matches already recorded while the connection was
+        active.</p>
+      </div>
+
+      <div>
+        <h2 className="legal-h2">Coach sharing</h2>
+        <p>If you choose to share training or match reports with a coach by email, you're responsible for
+        having a legitimate basis for sharing that data with them (for example, that they're genuinely your
+        coach). You choose whether training logs, match stats and attendance are included, and you can stop
+        sharing at any time. The digest is written from your whole Keepr profile, so it can also mention
+        injury and rehab information you've logged, as explained in the Privacy Policy.</p>
+      </div>
+
+      <div>
+        <h2 className="legal-h2">Uploaded content</h2>
+        <p>You're responsible for having the right to upload whatever you upload — PT/physio plans, match
+        videos, or anything else. Keepr does not accept video obtained by downloading from YouTube or
+        similar platforms through unofficial means. Acceptable sources for match video include your own
+        export from a platform you have rights to (for example, your own YouTube Studio download), footage
+        sent to you directly by a club or federation, or your own screen recording of something you had
+        legitimate access to watch.</p>
       </div>
 
       <div>
         <h2 className="legal-h2">Acceptable use</h2>
-        <p>Use Keepr for its intended purpose. Don't try to break, scrape, overload, or reverse-engineer
-        the service; don't attempt to extract, abuse, or misuse Kip in ways unrelated to goalkeeper
-        training; and don't use the app for anything illegal.</p>
+        <p>You agree not to:</p>
+        <ul className="list-disc pl-5 mt-2 space-y-1">
+          <li>Attempt to access another user's account or data without authorization</li>
+          <li>Misuse Keepr's AI-backed features (Kip, shot detection) in ways designed to impose
+          unreasonable cost on the service, including automated or scripted abuse</li>
+          <li>Upload content you don't have the right to upload</li>
+          <li>Use Keepr for any unlawful purpose, or in a way that infringes another person's rights</li>
+          <li>Attempt to reverse-engineer, scrape, or interfere with the normal operation of the
+          service</li>
+        </ul>
+        <p className="mt-2">We may suspend or terminate accounts that breach this section.</p>
       </div>
 
       <div>
-        <h2 className="legal-h2">Kip isn't a medical or licensed coaching professional</h2>
-        <p>Kip is an AI assistant, not a doctor, physiotherapist, or certified coach. Its advice is
-        informational and based on the context you give it. It doesn't know your body, your history,
-        or anything you haven't told it. Kip won't diagnose injuries or tell you to train through real
-        pain, and neither should you: for anything beyond mild soreness or normal fatigue, see a
-        physiotherapist or doctor before continuing to train. Training as a goalkeeper (diving,
-        sliding, repeated impact) carries a real risk of injury regardless of what any app tells you.
-        Use your judgment, warm up properly, and don't push through pain that doesn't feel normal.</p>
-      </div>
-
-      <div>
-        <h2 className="legal-h2">Your content</h2>
-        <p>Custom exercises, training blocks, match stats, and anything else you add to Keepr are
-        yours. We store it to run the app and don't claim ownership of it. You're responsible for what
-        you enter. Don't upload anything you don't have the right to share.</p>
-      </div>
-
-      <div>
-        <h2 className="legal-h2">Availability</h2>
-        <p>We aim to keep Keepr running reliably, but we don't guarantee uninterrupted access. Features
-        that depend on third-party services (like Kip, which relies on Anthropic's API) may be
-        unavailable if those services are down.</p>
+        <h2 className="legal-h2">Disclaimers and limitation of liability</h2>
+        <p>This section limits our legal responsibility to you. Read it carefully.</p>
+        <p className="mt-2">Keepr is provided "as is" and "as available," without warranties of any kind,
+        whether express or implied, including implied warranties of merchantability, fitness for a
+        particular purpose, and non-infringement. We don't warrant that the service will be uninterrupted,
+        error-free, or that any AI-generated content (including anything Kip says) will be accurate or
+        suitable for your specific circumstances.</p>
+        <p className="mt-2">To the maximum extent permitted by law, Keepr and its operator won't be liable
+        for any indirect, incidental, special, consequential, or punitive damages, or any loss of data,
+        arising from your use of the service. Our total liability arising from your use of Keepr, for any
+        claim, is limited to the amount you've paid us in the 12 months before the claim arose, or AUD $100
+        if you haven't paid us anything.</p>
+        <p className="mt-2">Nothing in this section excludes, restricts, or modifies any consumer guarantee,
+        right, or remedy under the Australian Consumer Law, or any other law, that cannot lawfully be
+        excluded, restricted, or modified. In particular, nothing in this section excludes or limits
+        liability for death or personal injury caused by negligence, or for fraud or wilful misconduct —
+        these cannot be excluded by contract under Australian law, regardless of what a limitation clause
+        says, so this document doesn't attempt to. Where a guarantee under the Australian Consumer Law
+        applies and can't be excluded but our liability can be limited, our liability is limited (at our
+        option) to re-supplying the service or paying the cost of having it re-supplied.</p>
+        <p className="mt-2">In short: the liability cap above applies to ordinary claims (bugs, downtime,
+        lost data from a technical failure), while death, personal injury caused by negligence, fraud, and
+        non-excludable consumer guarantees sit outside it entirely, as Australian law requires.</p>
       </div>
 
       <div>
         <h2 className="legal-h2">Termination</h2>
-        <p>You can stop using Keepr and ask us to delete your account at any time. We may suspend or
-        terminate accounts that violate these terms, including abusive use of Kip or the platform.</p>
+        <p>We may suspend or terminate your account if you breach these terms, in particular the acceptable
+        use section. If we terminate your account for a breach, we may delete your data straight away,
+        rather than on the 30-day timeline described in the Privacy Policy. If you delete your own account
+        voluntarily, the standard data retention and deletion terms in the Privacy Policy apply.</p>
       </div>
 
       <div>
-        <h2 className="legal-h2">Disclaimer</h2>
-        <p>Keepr is provided as-is, without warranties of any kind. We don't guarantee that any
-        exercise, training block, or piece of advice from Kip is suitable for your specific physical
-        condition. Physical training carries inherent risk of injury; consult a doctor before starting
-        a new training programme, especially if you have an existing injury or medical condition. To
-        the extent permitted by law, we're not liable for injuries or losses arising from your use of
-        the app or from following training advice it provides.</p>
+        <h2 className="legal-h2">Governing law</h2>
+        <p>These terms are governed by the laws of New South Wales, Australia, and you submit to the
+        non-exclusive jurisdiction of the courts of New South Wales.</p>
+        <p className="mt-2">If you're a consumer living outside Australia, this doesn't take away
+        protections you can't legally give up. Where the mandatory consumer protection law of your country
+        of residence applies to you and can't be excluded by agreement, nothing in this section overrides
+        those protections — this clause governs everything else, but it isn't an attempt to contract around
+        rights that are non-waivable where you live.</p>
       </div>
 
       <div>
         <h2 className="legal-h2">Changes to these terms</h2>
-        <p>If we make material changes, we'll update the date at the top of this page.</p>
+        <p>We'll notify you of material changes, particularly to acceptable use or pricing, by email to the
+        address on your account, and by updating the date at the top of this page, before the changes take
+        effect.</p>
       </div>
 
       <div>
         <h2 className="legal-h2">Contact</h2>
-        <p>Questions about these terms: <b>hello@keepr.coach</b></p>
+        <p><b>hello@keepr.coach</b></p>
       </div>
     </LegalLayout>
   );
