@@ -71,7 +71,20 @@ export function emptyZoneMap() {
   return z;
 }
 
+// A guest-teammate match (recordedForGuestId set — see "Identify keepers in
+// AI shot detection", part 3) belongs to someone the recording user recorded
+// FOR, not to the recording user themselves. Every function below that
+// computes the user's OWN stats from a raw matches array filters through
+// this first, so a guest's match can never silently blend into the user's
+// own save%/zone/report numbers no matter which of these functions a caller
+// reaches it through — the exclusion lives at the computation boundary, not
+// at each call site.
+export function myMatches(matches) {
+  return (matches || []).filter((m) => !m.recordedForGuestId);
+}
+
 export function aggregateMatchStats(matches, seasonFilter) {
+  matches = myMatches(matches);
   const zones = emptyZoneMap();
   let totalSaves = 0, totalGoals = 0, totalPoints = 0;
   const trend = [];
@@ -98,6 +111,7 @@ export function aggregateMatchStats(matches, seasonFilter) {
 }
 
 export function aggregateShotTypeStats(matches) {
+  matches = myMatches(matches);
   const map = {};
   matches.filter((m) => m.season === "Summer").forEach((m) => {
     (m.shots || []).forEach((s) => {
@@ -118,6 +132,7 @@ export function aggregateShotTypeStats(matches) {
 export const POSITIONS = ["LW", "LB", "CB", "RB", "RW", "Pivot"];
 
 export function aggregatePositionStats(matches) {
+  matches = myMatches(matches);
   const map = {};
   matches.filter((m) => m.season === "Winter").forEach((m) => {
     (m.shots || []).forEach((s) => {
@@ -244,6 +259,13 @@ export function normalizeOpponentName(name) {
 // Best-effort record: only counts matches whose free-text "result" field ends in a
 // standalone W/L/D (the form's own placeholder convention, e.g. "24-19 W"). Matches that
 // don't parse still count toward the match total and save% below, just not the record.
+// Deliberately does NOT filter out guest-teammate matches itself (unlike
+// aggregateMatchStats/aggregateShotTypeStats/aggregatePositionStats above) --
+// this is called both for the recording user's own aggregate opponent
+// history (where a caller should pass myMatches(matches) in) AND for a single
+// already-selected match regardless of whose it is (e.g. a live Kip
+// quick-tap query about whichever match is actively being recorded, self or
+// guest) -- filtering here would silently break the second case.
 export function opponentRecord(matches, opponentName, excludeId) {
   const target = normalizeOpponentName(opponentName);
   if (!target) return null;
@@ -287,10 +309,27 @@ export function upsertOpponentRoster(opponents, opponentName, roster) {
     : [...(opponents || []), { key, name, roster }];
 }
 
+// A "guest teammate" (see "Identify keepers in AI shot detection", part 3):
+// a teammate who doesn't use Keepr, entered directly by name (+ optional
+// jersey number for the video-detection identification path), no account
+// or invite-code connection needed. Same {name, number}-no-account shape as
+// an opponent roster entry, keyed by id instead of a normalized name since
+// there's no "same team" matching concern here -- each guest is just a
+// standalone local record, entirely within the recording user's own data.
+export function upsertGuestTeammate(guestTeammates, entry) {
+  const exists = (guestTeammates || []).some((g) => g.id === entry.id);
+  return exists
+    ? guestTeammates.map((g) => (g.id === entry.id ? { ...g, ...entry } : g))
+    : [...(guestTeammates || []), entry];
+}
+
 // Per-shooter save%/goals across every match vs this opponent, matched by
 // shot.shooterNumber against the roster's jersey number. Returns [] until
 // shots actually carry shooterNumber (wired in a later pass) — harmless,
 // since every caller already handles an empty breakdown.
+// Same "no filtering here" reasoning as opponentRecord just above -- this is
+// also called both for aggregate opponent history and for a single
+// already-selected live match.
 export function shooterStats(matches, opponentName, roster) {
   const target = normalizeOpponentName(opponentName);
   const byNumber = {};
@@ -370,6 +409,7 @@ export function zoneColor(z) {
 }
 
 export function buildKipSystemPrompt(profile, plans, season, matches, exercises = [], adHocSessions = []) {
+  matches = myMatches(matches);
   const activePlan = [...plans].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
   const recentLogs = [];
   plans.forEach((p) => {
@@ -601,7 +641,7 @@ export const TRAINING_LOG_WINDOW_DAYS = 42; // 6 weeks
 export function weakestZoneSignal(matches, season) {
   const agg = aggregateMatchStats(matches, season);
   const totalShots = agg.totalSaves + agg.totalGoals;
-  const seasonMatches = matches.filter((m) => m.season === season).length;
+  const seasonMatches = myMatches(matches).filter((m) => m.season === season).length;
   if (seasonMatches < MATCH_DATA_MIN_MATCHES || totalShots < MATCH_DATA_MIN_SHOTS) return null;
   const zoneEntries = Object.entries(agg.zones)
     .filter(([, z]) => z.saves + z.goals > 0)
@@ -1200,7 +1240,7 @@ export function computeTotalPoints(plans, adHocSessions, matches) {
   const planSessionsDone = plans.reduce((a, p) => a + p.weeks.reduce((b, w) => b + w.sessions.filter((s) => s.completed).length, 0), 0);
   const adHocDone = (adHocSessions || []).filter((s) => s.completed).length;
   const sessionsCompleted = planSessionsDone + adHocDone;
-  const matchesLogged = (matches || []).length;
+  const matchesLogged = myMatches(matches).length;
   const prsHit = totalPrCount(plans, adHocSessions);
   return {
     total: sessionsCompleted * SESSION_POINTS + matchesLogged * MATCH_POINTS + prsHit * PR_POINTS,
@@ -1250,7 +1290,7 @@ export const TREND_MIN_SHOTS_PER_HALF = 4;
 export const TREND_SWING_POINTS = 15;
 
 export function splitMatchHalves(matches, seasonFilter) {
-  const subset = matches.filter((m) => m.season === seasonFilter).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const subset = myMatches(matches).filter((m) => m.season === seasonFilter).sort((a, b) => new Date(a.date) - new Date(b.date));
   if (subset.length < TREND_MIN_MATCHES) return null;
   const mid = Math.floor(subset.length / 2);
   return { older: subset.slice(0, mid), newer: subset.slice(mid) };
@@ -1410,6 +1450,7 @@ export function completedBlockSignals(plans) {
 // count, a new PR, a new week), then returns only the ones not yet seen —
 // this is the actual "don't repeat yourself" mechanism, not a time cooldown.
 export function computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises }) {
+  matches = myMatches(matches);
   const items = [];
 
   missedSessionsSignals(plans).forEach((s) => {

@@ -40,6 +40,7 @@ import {
   EMAIL_ALERT_CATEGORIES, categoryForAlertType, DEFAULT_EXERCISES,
   computeReportData, computeCoachReportData, COACH_SHARE_CATEGORIES,
   planSessionName, buildTrainingShotRecords, aggregateTrainingStats, aggregateTrainingByDrill,
+  myMatches, upsertGuestTeammate,
 } from "./lib/kipDomain.js";
 
 /* ---------------------------------------------------------------- */
@@ -341,6 +342,12 @@ export default function GKTrainerApp() {
   // Opponent-team-level rosters — keyed by normalized name, shared across
   // every match against that team rather than living on any single match.
   const [opponents, setOpponents] = useState([]);
+  // Teammates who don't use Keepr — name + optional jersey number, no
+  // account, no invite-code connection, entirely local to this account. See
+  // "Identify keepers in AI shot detection", part 3. Same shape/reasoning as
+  // opponent rosters just above, parallel array rather than nesting inside
+  // profile since it's a list of records, not a single settings blob.
+  const [guestTeammates, setGuestTeammates] = useState([]);
   // Uploaded files not linked to any specific niggle — same shape and same
   // private-bucket storage as niggle.files, just not attached to one entity.
   // Like profile.niggles, this is injury/rehab-adjacent data: if a
@@ -397,6 +404,7 @@ export default function GKTrainerApp() {
           setMatches(parsed.matches || []);
           setAdHocSessions(parsed.adHocSessions || []);
           setOpponents(parsed.opponents || []);
+          setGuestTeammates(parsed.guestTeammates || []);
           setGeneralUploads(parsed.generalUploads || []);
           setReports(parsed.reports || []);
           setPendingCalendarSuggestions(parsed.pendingCalendarSuggestions || []);
@@ -428,7 +436,7 @@ export default function GKTrainerApp() {
     return computeKipAlerts({ profile, plans, adHocSessions, matches, season, exercises: allExercises }).length > 0;
   }, [profile, plans, adHocSessions, matches, season, allExercises]);
 
-  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGeneralUploads = generalUploads, nextReports = reports, nextPendingCalendarSuggestions = pendingCalendarSuggestions }) {
+  function updateAndSave({ nextCustom = customExercises, nextPlans = plans, nextSeason = season, nextProfile = profile, nextKip = kipMessages, nextMatches = matches, nextAdHoc = adHocSessions, nextOpponents = opponents, nextGuestTeammates = guestTeammates, nextGeneralUploads = generalUploads, nextReports = reports, nextPendingCalendarSuggestions = pendingCalendarSuggestions }) {
     setCustomExercises(nextCustom);
     setPlans(nextPlans);
     setSeason(nextSeason);
@@ -437,10 +445,11 @@ export default function GKTrainerApp() {
     setMatches(nextMatches);
     setAdHocSessions(nextAdHoc);
     setOpponents(nextOpponents);
+    setGuestTeammates(nextGuestTeammates);
     setGeneralUploads(nextGeneralUploads);
     setReports(nextReports);
     setPendingCalendarSuggestions(nextPendingCalendarSuggestions);
-    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, generalUploads: nextGeneralUploads, reports: nextReports, pendingCalendarSuggestions: nextPendingCalendarSuggestions });
+    persist({ customExercises: nextCustom, plans: nextPlans, season: nextSeason, profile: nextProfile, kipMessages: nextKip, matches: nextMatches, adHocSessions: nextAdHoc, opponents: nextOpponents, guestTeammates: nextGuestTeammates, generalUploads: nextGeneralUploads, reports: nextReports, pendingCalendarSuggestions: nextPendingCalendarSuggestions });
   }
 
   function addExercise(ex) {
@@ -491,6 +500,41 @@ export default function GKTrainerApp() {
     updateAndSave({ nextMatches: next });
   }
 
+  // The local, no-RPC equivalent of createOrResumeTeammateMatch for a guest
+  // teammate -- same "find or create, keyed by guest + opponent + date"
+  // idempotency (so switching to a guest more than once, or re-running
+  // detection, doesn't spawn duplicate matches for them), but a guest's
+  // match lives in this same account's own matches array (tagged
+  // recordedForGuestId) rather than a real cross-account write, since
+  // there's no other account to write into. Synchronous, unlike the RPC
+  // version -- there's no network round trip for a local record.
+  function findOrCreateGuestMatch(guestId, { opponent, date, competition, season }) {
+    const existing = matches.find((m) => m.recordedForGuestId === guestId
+      && normalizeOpponentName(m.opponent) === normalizeOpponentName(opponent) && m.date === date);
+    if (existing) return existing;
+    const created = { id: uid(), recordedForGuestId: guestId, opponent, date, competition: competition || "", result: "", season, shots: [] };
+    saveMatch(created);
+    return created;
+  }
+
+  // Confirm-time fan-out for AI-detected shots attributed to someone other
+  // than the recording user (see "Identify keepers in AI shot detection",
+  // part 3a) -- a batch of shots for one identity, appended in one write
+  // rather than one saveMatch/patchTeammateMatch call per shot.
+  function confirmGuestDetectedShots({ guestId, opponent, date, competition, season, shots }) {
+    const existing = matches.find((m) => m.recordedForGuestId === guestId
+      && normalizeOpponentName(m.opponent) === normalizeOpponentName(opponent) && m.date === date);
+    const nextMatch = existing
+      ? { ...existing, shots: [...(existing.shots || []), ...shots] }
+      : { id: uid(), recordedForGuestId: guestId, opponent, date, competition: competition || "", result: "", season, shots };
+    saveMatch(nextMatch);
+  }
+
+  async function confirmTeammateDetectedShots({ ownerId, opponent, date, competition, season, shots }) {
+    const teammateMatch = await createOrResumeTeammateMatch({ ownerId, opponent, date, competition, season });
+    await patchTeammateMatch(ownerId, teammateMatch.id, { shots: [...(teammateMatch.shots || []), ...shots] });
+  }
+
   // Nothing is created or persisted while a setup screen is open — unlike
   // the old flow, where tapping "Record" immediately created the session/
   // match with a running clock. beginTrainingRecording/beginMatchRecording
@@ -527,10 +571,16 @@ export default function GKTrainerApp() {
     setPendingSetup(null);
   }
 
-  function beginMatchRecording(fields, teammate) {
+  function beginMatchRecording(fields, identity) {
     const withRecording = { id: uid(), ...fields, shots: [], recording: startRecording() };
     saveMatch(withRecording);
-    setActiveLiveTarget({ kind: "match", matchId: withRecording.id, teammateOwnerId: teammate?.ownerId || null, teammateEmail: teammate?.email || null });
+    setActiveLiveTarget({
+      kind: "match", matchId: withRecording.id,
+      teammateOwnerId: identity?.type === "teammate" ? identity.ownerId : null,
+      teammateEmail: identity?.type === "teammate" ? identity.email : null,
+      guestId: identity?.type === "guest" ? identity.id : null,
+      guestName: identity?.type === "guest" ? identity.name : null,
+    });
     setPendingSetup(null);
   }
 
@@ -560,6 +610,14 @@ export default function GKTrainerApp() {
 
   function saveOpponentRoster(opponentName, roster) {
     updateAndSave({ nextOpponents: upsertOpponentRoster(opponents, opponentName, roster) });
+  }
+
+  function saveGuestTeammate(entry) {
+    updateAndSave({ nextGuestTeammates: upsertGuestTeammate(guestTeammates, entry) });
+  }
+
+  function deleteGuestTeammate(id) {
+    updateAndSave({ nextGuestTeammates: guestTeammates.filter((g) => g.id !== id) });
   }
 
   function addGeneralUpload(meta) {
@@ -737,6 +795,8 @@ export default function GKTrainerApp() {
             onDeleteAdHoc={deleteAdHocSession}
             opponents={opponents}
             onSaveOpponentRoster={saveOpponentRoster}
+            guestTeammates={guestTeammates}
+            onSaveGuestTeammate={saveGuestTeammate}
             onOpenLiveRecorder={setActiveLiveTarget}
             kipMessages={kipMessages}
             onSaveMessages={saveKipMessages}
@@ -773,6 +833,9 @@ export default function GKTrainerApp() {
             onRemoveGeneralUpload={removeGeneralUpload}
             season={season}
             onBulkAddMatches={bulkAddMatches}
+            guestTeammates={guestTeammates}
+            onSaveGuestTeammate={saveGuestTeammate}
+            onDeleteGuestTeammate={deleteGuestTeammate}
           />
         )}
         {tab === "stats" && (
@@ -788,6 +851,10 @@ export default function GKTrainerApp() {
             onSaveAdHoc={saveAdHocSession}
             opponents={opponents}
             onSaveOpponentRoster={saveOpponentRoster}
+            guestTeammates={guestTeammates}
+            onSaveGuestTeammate={saveGuestTeammate}
+            onConfirmGuestShots={confirmGuestDetectedShots}
+            onConfirmTeammateShots={confirmTeammateDetectedShots}
             onOpenLiveRecorder={setActiveLiveTarget}
             onOpenTrainingSetup={() => setPendingSetup({ kind: "training" })}
             profile={profile}
@@ -945,6 +1012,9 @@ export default function GKTrainerApp() {
             onOpenKip={onOpenKip}
             teammateOwnerId={activeLiveTarget.teammateOwnerId || null}
             teammateEmail={activeLiveTarget.teammateEmail || null}
+            guestId={activeLiveTarget.guestId || null}
+            guestName={activeLiveTarget.guestName || null}
+            onSaveGuestMatch={saveMatch}
             onUpdatePatch={(patch) => saveMatch({ ...liveMatch, ...patch })}
             onFinish={(patch, teammateMatchId) => {
               const { recording, ...rest } = liveMatch;
@@ -1093,6 +1163,8 @@ export default function GKTrainerApp() {
           matches={matches}
           opponents={opponents}
           onSaveOpponentRoster={saveOpponentRoster}
+          guestTeammates={guestTeammates}
+          onSaveGuestTeammate={saveGuestTeammate}
           onStart={beginMatchRecording}
           onClose={() => setPendingSetup(null)}
         />
@@ -2218,7 +2290,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
+function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2761,6 +2833,8 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
           initialDate={matchFormDate}
           opponents={opponents}
           onSaveOpponentRoster={onSaveOpponentRoster}
+          guestTeammates={guestTeammates}
+          onSaveGuestTeammate={onSaveGuestTeammate}
           onClose={() => setMatchFormDate(null)}
           onSave={(m) => { onSaveMatch(m); setMatchFormDate(null); setFootageStepMatchId(m.id); }}
         />
@@ -2965,6 +3039,40 @@ function WorkoutSetupScreen({ onStart, onClose }) {
   );
 }
 
+// Small reusable "+ Add a teammate who doesn't use Keepr" affordance --
+// same lightweight name-only entry the opponent roster already uses (see
+// "Identify keepers in AI shot detection", part 3), reused wherever an
+// identity needs picking rather than a one-off form each time.
+function GuestTeammateInlineAdd({ onAdd }) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  if (!adding) {
+    return (
+      <button onClick={() => setAdding(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
+        <Plus size={12} /> Add a teammate who doesn't use Keepr
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <input className="input flex-1" placeholder="Their name" value={name} onChange={(e) => setName(e.target.value)} />
+      <button
+        onClick={() => {
+          const trimmed = name.trim();
+          if (!trimmed) return;
+          onAdd({ id: uid(), name: trimmed, jerseyNumber: null });
+          setName("");
+          setAdding(false);
+        }}
+        className="px-3 py-2 rounded-lg text-white text-xs font-bold shrink-0"
+        style={{ background: "#0E8388" }}
+      >
+        Add
+      </button>
+    </div>
+  );
+}
+
 // Same "nothing created until Start" rule as TrainingSetupScreen, plus this
 // is where the teammate connection for THIS match gets made per the
 // invite-code mechanism (migration 0005) — not a separate settings flow.
@@ -2974,10 +3082,14 @@ function WorkoutSetupScreen({ onStart, onClose }) {
 // can only be called by the account being recorded for) — a code entered
 // here either matches an already-permitted teammate (immediately usable)
 // or starts a request that still needs the other side's own action.
-function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, onStart, onClose }) {
+function MatchSetupScreen({ season, matches, opponents, guestTeammates = [], onSaveGuestTeammate, onSaveOpponentRoster, onStart, onClose }) {
   const [form, setForm] = useState({ opponent: "", competition: "", season, videoUrl: "" });
   const [rosterOpen, setRosterOpen] = useState(false);
   const [teammateOptions, setTeammateOptions] = useState([]);
+  // { type: "teammate", ownerId, email } | { type: "guest", id, name } | null
+  // -- a guest teammate (no account, no invite code) sits in the exact same
+  // slot a connected teammate does, per "Identify keepers in AI shot
+  // detection", part 3.
   const [selectedTeammate, setSelectedTeammate] = useState(null);
   const [myCode, setMyCode] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -2992,7 +3104,7 @@ function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, on
         const [code, rows] = await Promise.all([getMyInviteCode(), getMyConnections()]);
         setMyCode(code);
         const { canRecordFor } = summarizeConnections(rows, user?.id);
-        setTeammateOptions(canRecordFor.map((c) => partnerOf(c, user?.id)).map((p) => ({ ownerId: p.id, email: p.email })));
+        setTeammateOptions(canRecordFor.map((c) => partnerOf(c, user?.id)).map((p) => ({ type: "teammate", ownerId: p.id, email: p.email })));
       } catch (e) {
         setTeammateOptions([]);
       }
@@ -3060,7 +3172,7 @@ function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, on
 
         <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
           <div className="text-sm font-bold mb-1.5" style={{ color: "#12213A" }}>Recording with a teammate?</div>
-          {teammateOptions.length > 0 && (
+          {(teammateOptions.length > 0 || guestTeammates.length > 0) && (
             <div className="flex flex-wrap gap-1.5 mb-2.5">
               <button
                 onClick={() => setSelectedTeammate(null)}
@@ -3074,13 +3186,25 @@ function MatchSetupScreen({ season, matches, opponents, onSaveOpponentRoster, on
                   key={t.ownerId}
                   onClick={() => setSelectedTeammate(t)}
                   className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
-                  style={selectedTeammate?.ownerId === t.ownerId ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                  style={selectedTeammate?.type === "teammate" && selectedTeammate?.ownerId === t.ownerId ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
                 >
                   {t.email}
                 </button>
               ))}
+              {guestTeammates.map((g) => (
+                <button
+                  key={g.id}
+                  onClick={() => setSelectedTeammate({ type: "guest", id: g.id, name: g.name })}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
+                  style={selectedTeammate?.type === "guest" && selectedTeammate?.id === g.id ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                >
+                  {g.name} <span className="opacity-70">· no Keepr</span>
+                </button>
+              ))}
             </div>
           )}
+          <GuestTeammateInlineAdd onAdd={(entry) => { onSaveGuestTeammate(entry); setSelectedTeammate({ type: "guest", id: entry.id, name: entry.name }); }} />
+          <div className="my-2.5 border-t" style={{ borderColor: "#DAD7CC" }} />
           <p className="text-xs text-gray-500 mb-2">Not connected yet? Share your code, or enter theirs — mutual consent still applies, so they'll need to accept and grant you recording permission from their own phone.</p>
           <button onClick={copyMyCode} className="w-full text-left rounded-md px-2.5 py-2 text-xs font-mono font-bold tracking-wide mb-1" style={{ background: "#F3F2ED", color: "#12213A" }}>
             {myCode || "…"}
@@ -4731,7 +4855,7 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
 // overlay, since it's now scoped to this tab rather than floating above all
 // of them. onCancel is deliberately omitted from KipOnboarding here: there's
 // no other screen to cancel back to, Profile IS the destination.
-function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, season, onBulkAddMatches }) {
+function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, season, onBulkAddMatches, guestTeammates = [], onSaveGuestTeammate, onDeleteGuestTeammate }) {
   const [showUploads, setShowUploads] = useState(false);
 
   if (showUploads) {
@@ -4769,6 +4893,7 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
       </div>
       <NotificationsSection profile={profile} onSaveProfile={onSaveProfile} />
       <TeammatesSection />
+      <GuestTeammatesSection guestTeammates={guestTeammates} onSave={onSaveGuestTeammate} onDelete={onDeleteGuestTeammate} />
     </div>
   );
 }
@@ -5078,6 +5203,72 @@ function TeammatesSection() {
             >
               Disconnect
             </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Teammates who don't use Keepr (see "Identify keepers in AI shot
+// detection", part 3) -- unlike TeammatesSection just above, there's no
+// invite code, no mutual consent, no separate account to fetch/sync with.
+// Same local-record simplicity as CoachSharingSection just below, just a
+// list instead of a single field. Primarily managed inline wherever an
+// identity needs picking (match setup, video-detection setup); this section
+// is for reviewing/cleaning up the list afterward.
+function GuestTeammatesSection({ guestTeammates, onSave, onDelete }) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  return (
+    <div className="px-4 pt-4">
+      <div className="bg-white rounded-lg border p-3.5 mb-4" style={{ borderColor: "#DAD7CC" }}>
+        <div className="text-sm font-bold mb-1 flex items-center gap-1.5" style={{ color: "#12213A" }}>
+          <Users size={14} color="#0E8388" /> Teammates without Keepr
+        </div>
+        <p className="text-xs text-gray-500 mb-2">Name-only, no account needed — for recording a match on their behalf. Their stats stay separate from yours, under "Recorded for a teammate" in Match stats.</p>
+        <div className="space-y-1.5 mb-2">
+          {guestTeammates.map((g) => (
+            <div key={g.id} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
+              <div className="text-sm" style={{ color: "#12213A" }}>{g.name}{g.jerseyNumber ? ` · #${g.jerseyNumber}` : ""}</div>
+              <IconButton icon={X} size={13} label="Remove teammate" onClick={() => setConfirmDeleteId(g.id)} color="#C1483B" pad={9} />
+            </div>
+          ))}
+          {guestTeammates.length === 0 && <div className="text-xs text-gray-400">None added yet.</div>}
+        </div>
+        {adding ? (
+          <div className="flex items-center gap-2">
+            <input className="input flex-1" placeholder="Their name" value={name} onChange={(e) => setName(e.target.value)} />
+            <button
+              onClick={() => {
+                const trimmed = name.trim();
+                if (!trimmed) return;
+                onSave({ id: uid(), name: trimmed, jerseyNumber: null });
+                setName("");
+                setAdding(false);
+              }}
+              className="px-3 py-2 rounded-lg text-white text-xs font-bold shrink-0"
+              style={{ background: "#0E8388" }}
+            >
+              Add
+            </button>
+          </div>
+        ) : (
+          <button onClick={() => setAdding(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
+            <Plus size={12} /> Add a teammate
+          </button>
+        )}
+      </div>
+
+      {confirmDeleteId && (
+        <Modal onClose={() => setConfirmDeleteId(null)}>
+          <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Remove this teammate?</h3>
+          <p className="text-sm text-gray-600 mb-4">Matches already recorded for them stay exactly as they are — this only removes them from future pickers.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmDeleteId(null)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Cancel</button>
+            <button onClick={() => { onDelete(confirmDeleteId); setConfirmDeleteId(null); }} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Remove</button>
           </div>
         </Modal>
       )}
@@ -5711,7 +5902,14 @@ async function extractScheduleFromFile(file) {
 // confidently as a keeper tapping the chip themselves.
 const BEACH_DETECTABLE_SHOT_TYPES = ["Regular", "Spin / 360", "Alley-oop", "Specialist / GK goal"];
 
-function shotDetectionPrompt(season) {
+// Kit color and jersey-number reading are both about telling apart WHICH
+// keeper a shot belongs to -- see "Identify keepers in AI shot detection".
+// Deliberately never framed as identity/face matching anywhere in this
+// prompt: a kit-color mismatch just flags "this is probably the other
+// team's keeper," and a jersey number is plain OCR-style digit reading, not
+// biometric recognition. Both are optional add-ons to the base prompt,
+// only present when the setup step actually asked for them.
+function shotDetectionPrompt(season, { keeperKitColor, needsJerseyRead } = {}) {
   const isBeach = season === "Summer";
   const shotTypeField = isBeach
     ? `, "shotType": "Regular" | "Spin / 360" | "Alley-oop" | "Specialist / GK goal" | null, "shotTypeConfidence": "high" | "medium" | "low"`
@@ -5721,16 +5919,27 @@ function shotDetectionPrompt(season) {
 - "shotTypeConfidence" is how sure you are about "shotType" specifically, independent of "confidence" above — this is a genuinely harder call than save/goal or zone, so use "low" freely; don't let a confident save/goal read imply a confident technique read.`
     : "";
 
+  const kitField = keeperKitColor ? `, "keeperKit": "match" | "different" | "unclear"` : "";
+  const kitGuidance = keeperKitColor
+    ? `\n- "keeperKit" compares the goalkeeper in these frames against a ${keeperKitColor} kit: "match" if this goalkeeper is wearing ${keeperKitColor}, "different" if they're clearly wearing a different color (almost always the opposition's own keeper, not the one being tracked), "unclear" if the kit color genuinely isn't visible.`
+    : "";
+
+  const jerseyField = needsJerseyRead ? `, "keeperJerseyNumber": string | null, "keeperJerseyConfidence": "high" | "medium" | "low"` : "";
+  const jerseyGuidance = needsJerseyRead
+    ? `\n- "keeperJerseyNumber" is the jersey number on the goalkeeper's back or chest, read as plain digits (e.g. "7"), if visible -- this is OCR-style number reading, nothing more. Null if no number is visible or legible.
+- "keeperJerseyConfidence" is how sure you are of that specific number reading -- camera distance, angle and motion blur make this a meaningfully less reliable read than the outcome/zone call above, so use "low" freely and never let a clear save/goal read imply a clear number read.`
+    : "";
+
   return `You are looking at one or more sequential frames from a handball match video, captured around a moment a cheap motion-detection pass flagged as possibly containing a shot at goal. You are using general visual understanding, not a specialised ball-tracking model -- if you genuinely can't tell, say so via low confidence and null fields rather than guessing.
 
 Respond with ONLY a single JSON object, no other text before or after it, in exactly this shape:
 
-{"isShot": boolean, "outcome": "Save" | "Goal" | null, "zone": "TL" | "TM" | "TR" | "ML" | "MM" | "MR" | "BL" | "BM" | "BR" | null, "confidence": "high" | "medium" | "low"${shotTypeField}, "reason": string}
+{"isShot": boolean, "outcome": "Save" | "Goal" | null, "zone": "TL" | "TM" | "TR" | "ML" | "MM" | "MR" | "BL" | "BM" | "BR" | null, "confidence": "high" | "medium" | "low"${shotTypeField}${kitField}${jerseyField}, "reason": string}
 
 - "isShot" is true only if this genuinely looks like a shot at the goal being taken and resolved (saved or scored) -- not a pass, a fast break, a throw-in, a warm-up, a celebration, or a crowd/bench/sideline shot. If the frames don't clearly show the goal and goalkeeper, isShot is false.
 - "outcome": "Save" if the goalkeeper stops it, "Goal" if it goes in. Null if isShot is false or the outcome genuinely isn't visible.
 - "zone" is a 3x3 grid of the goal FROM THE GOALKEEPER'S OWN PERSPECTIVE, facing the shooter: first letter is row (T=top, M=middle, B=bottom), second is column (L=left, M=middle, R=right) -- e.g. "TL" is top-left as the goalkeeper sees it, which is the shooter's top-right. Null if not visible or not applicable.
-- "confidence" reflects how sure you actually are, not how complete the JSON looks -- use "low" freely when the footage is blurry, too wide, or ambiguous.${shotTypeGuidance}
+- "confidence" reflects how sure you actually are, not how complete the JSON looks -- use "low" freely when the footage is blurry, too wide, or ambiguous.${shotTypeGuidance}${kitGuidance}${jerseyGuidance}
 - "reason" is one short sentence explaining the call, useful for a human reviewing your suggestion afterward.`;
 }
 
@@ -5740,7 +5949,10 @@ Respond with ONLY a single JSON object, no other text before or after it, in exa
 // `usage` block so the caller can accumulate real cost, not an estimate.
 // `season` is only used to decide whether to ask for beach shot-type
 // classification at all -- an indoor video never gets that field asked of it.
-async function detectShotAtMoment(frameDataUrls, season) {
+// `keeperKitColor`/`needsJerseyRead` are the part-1/part-2 keeper-
+// identification add-ons -- both optional, both entirely dropped from the
+// prompt (and the parsed result) when not supplied.
+async function detectShotAtMoment(frameDataUrls, season, { keeperKitColor, needsJerseyRead } = {}) {
   const { data: { session } } = await supabase.auth.getSession();
   const imageBlocks = frameDataUrls.map((dataUrl) => ({
     type: "image",
@@ -5753,7 +5965,7 @@ async function detectShotAtMoment(frameDataUrls, season) {
       Authorization: `Bearer ${session?.access_token}`,
     },
     body: JSON.stringify({
-      system: shotDetectionPrompt(season),
+      system: shotDetectionPrompt(season, { keeperKitColor, needsJerseyRead }),
       messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Is this a shot at goal? Answer per the instructions." }] }],
       maxTokens: 300,
     }),
@@ -5772,11 +5984,14 @@ async function detectShotAtMoment(frameDataUrls, season) {
       confidence: ["high", "medium", "low"].includes(parsed.confidence) ? parsed.confidence : "low",
       shotType: season === "Summer" && BEACH_DETECTABLE_SHOT_TYPES.includes(parsed.shotType) ? parsed.shotType : null,
       shotTypeConfidence: ["high", "medium", "low"].includes(parsed.shotTypeConfidence) ? parsed.shotTypeConfidence : "low",
+      keeperKit: keeperKitColor && ["match", "different", "unclear"].includes(parsed.keeperKit) ? parsed.keeperKit : null,
+      keeperJerseyNumber: needsJerseyRead && parsed.keeperJerseyNumber ? String(parsed.keeperJerseyNumber).trim() : null,
+      keeperJerseyConfidence: ["high", "medium", "low"].includes(parsed.keeperJerseyConfidence) ? parsed.keeperJerseyConfidence : "low",
       reason: parsed.reason || null,
       usage,
     };
   } catch (e) {
-    return { isShot: false, outcome: null, zone: null, confidence: "low", shotType: null, shotTypeConfidence: "low", reason: "Couldn't parse Kip's response.", usage };
+    return { isShot: false, outcome: null, zone: null, confidence: "low", shotType: null, shotTypeConfidence: "low", keeperKit: null, keeperJerseyNumber: null, keeperJerseyConfidence: "low", reason: "Couldn't parse Kip's response.", usage };
   }
 }
 
@@ -6014,8 +6229,9 @@ function executeGetStats(input, ctx) {
     case "opponent_breakdown": {
       if (!input.opponent_name) return { error: "opponent_name is required for opponent_breakdown." };
       const roster = findOpponentRoster(ctx.opponents, input.opponent_name)?.roster || [];
-      const shooters = shooterStats(ctx.matches, input.opponent_name, roster);
-      const record = opponentRecord(ctx.matches, input.opponent_name);
+      const myCtxMatches = myMatches(ctx.matches);
+      const shooters = shooterStats(myCtxMatches, input.opponent_name, roster);
+      const record = opponentRecord(myCtxMatches, input.opponent_name);
       if (!record) return { note: `No matches logged yet against "${input.opponent_name}".` };
       return { opponent: input.opponent_name, record, shooters: shooters.length ? shooters : undefined, note: shooters.length === 0 ? "No shots have shooter numbers attributed yet for this opponent." : undefined };
     }
@@ -6693,10 +6909,13 @@ function ShotLogModal({ season, zone, videoUrl, roster = [], onClose, onSave }) 
 // Tappable even for an opponent with no match history yet — a roster can be
 // built up-front, before the first match against a team is ever logged.
 function OpponentHistoryNote({ matches, opponent, excludeId, roster, onTap }) {
-  const rec = opponentRecord(matches, opponent, excludeId);
+  // My own opponent history, never a guest teammate's -- see myMatches in
+  // kipDomain.js.
+  const myOwnMatches = myMatches(matches);
+  const rec = opponentRecord(myOwnMatches, opponent, excludeId);
   const name = (opponent || "").trim();
   if (!name) return null;
-  const danger = rec ? mostDangerousShooter(matches, opponent, roster) : null;
+  const danger = rec ? mostDangerousShooter(myOwnMatches, opponent, roster) : null;
   return (
     <button type="button" onClick={onTap} className="text-[11px] text-gray-500 mt-1 text-left underline decoration-dotted underline-offset-2">
       {rec ? (
@@ -6719,8 +6938,9 @@ function OpponentDetailModal({ opponentName, opponents, matches, onClose, onSave
   const [numberInput, setNumberInput] = useState("");
   const [nameInput, setNameInput] = useState("");
   const name = (opponentName || "").trim();
-  const rec = opponentRecord(matches, opponentName);
-  const stats = shooterStats(matches, opponentName, roster);
+  const myOwnMatches = myMatches(matches);
+  const rec = opponentRecord(myOwnMatches, opponentName);
+  const stats = shooterStats(myOwnMatches, opponentName, roster);
 
   function addEntry() {
     const number = numberInput.trim();
@@ -6792,11 +7012,12 @@ function OpponentDetailModal({ opponentName, opponents, matches, onClose, onSave
   );
 }
 
-function MatchFormModal({ season, matches, onClose, onSave, initialDate, title = "New match", submitLabel = "Create match", opponents = [], onSaveOpponentRoster, teammateOptions = [] }) {
-  const [form, setForm] = useState({ date: initialDate || new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "", teammateOwnerId: null });
+function MatchFormModal({ season, matches, onClose, onSave, initialDate, title = "New match", submitLabel = "Create match", opponents = [], onSaveOpponentRoster, teammateOptions = [], guestTeammates = [], onSaveGuestTeammate }) {
+  const [form, setForm] = useState({ date: initialDate || new Date().toISOString().slice(0, 10), opponent: "", competition: "", result: "", season, videoUrl: "", teammateOwnerId: null, guestId: null });
   const [rosterOpen, setRosterOpen] = useState(false);
   const valid = form.date && form.opponent.trim();
   const selectedTeammate = teammateOptions.find((t) => t.ownerId === form.teammateOwnerId) || null;
+  const selectedGuest = guestTeammates.find((g) => g.id === form.guestId) || null;
   return (
     <Modal onClose={onClose}>
       <h3 className="text-base font-black mb-3" style={{ color: "#12213A" }}>{title}</h3>
@@ -6829,24 +7050,34 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate, title =
         <Field label="Video link (optional)">
           <input className="input" placeholder="YouTube, Drive, wherever the footage lives" value={form.videoUrl} onChange={(e) => setForm({ ...form, videoUrl: e.target.value })} />
         </Field>
-        {teammateOptions.length > 0 && (
-          <Field label="Recording with a teammate?">
+        {(teammateOptions.length > 0 || guestTeammates.length > 0 || onSaveGuestTeammate) && (
+          <Field label="Logging this for a teammate?">
             <div className="flex flex-wrap gap-1.5">
               <button
-                onClick={() => setForm({ ...form, teammateOwnerId: null })}
+                onClick={() => setForm({ ...form, teammateOwnerId: null, guestId: null })}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
-                style={!form.teammateOwnerId ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                style={!form.teammateOwnerId && !form.guestId ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
               >
                 Just me
               </button>
               {teammateOptions.map((t) => (
                 <button
                   key={t.ownerId}
-                  onClick={() => setForm({ ...form, teammateOwnerId: t.ownerId })}
+                  onClick={() => setForm({ ...form, teammateOwnerId: t.ownerId, guestId: null })}
                   className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
                   style={form.teammateOwnerId === t.ownerId ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
                 >
                   {t.email}
+                </button>
+              ))}
+              {guestTeammates.map((g) => (
+                <button
+                  key={g.id}
+                  onClick={() => setForm({ ...form, guestId: g.id, teammateOwnerId: null })}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold border"
+                  style={form.guestId === g.id ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}
+                >
+                  {g.name} <span className="opacity-70">· no Keepr</span>
                 </button>
               ))}
             </div>
@@ -6855,17 +7086,24 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate, title =
                 You'll get a switch to move between recording your own shots and {selectedTeammate.email}'s — theirs goes straight into their own account, and they can review or correct it afterward.
               </p>
             )}
+            {selectedGuest && (
+              <p className="text-[11px] text-gray-500 mt-1.5">
+                This whole match will be logged as {selectedGuest.name}'s, not yours — it stays in your account (they don't use Keepr) but is kept out of your own stats.
+              </p>
+            )}
+            {onSaveGuestTeammate && <div className="mt-2"><GuestTeammateInlineAdd onAdd={(entry) => { onSaveGuestTeammate(entry); setForm({ ...form, guestId: entry.id, teammateOwnerId: null }); }} /></div>}
           </Field>
         )}
         <button
           disabled={!valid}
           onClick={() => {
-            const { teammateOwnerId, ...matchFields } = form;
+            const { teammateOwnerId, guestId, ...matchFields } = form;
             onSave({
               id: uid(),
               ...matchFields,
               shots: [],
               ...(teammateOwnerId ? { teammateOwnerId, teammateEmail: selectedTeammate?.email || null } : {}),
+              ...(guestId ? { recordedForGuestId: guestId } : {}),
             });
           }}
           className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40"
@@ -7076,107 +7314,259 @@ function VideoPanel({ videoUrl, videoFile, uploadId, onSaveVideoUrl, onSaveVideo
 const SONNET_5_INPUT_PER_MTOK = 2.0;
 const SONNET_5_OUTPUT_PER_MTOK = 10.0;
 
-function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) {
-  const [stage, setStage] = useState("scanning"); // scanning | analyzing | review | failed
+// Plain-language names, not hex codes, are handed straight to the vision
+// prompt ("a black kit" is a far better instruction than "kit color
+// #111111") -- see "Identify keepers in AI shot detection", part 1. "Other"
+// still needs a stored hex (for the swatch UI itself), it just isn't the
+// thing the model reads.
+const KIT_COLOR_PRESETS = [
+  { name: "Black", hex: "#111111" }, { name: "White", hex: "#f5f5f5" },
+  { name: "Red", hex: "#c1483b" }, { name: "Blue", hex: "#2d5fa3" },
+  { name: "Green", hex: "#2f7a4f" }, { name: "Yellow", hex: "#e8c547" },
+  { name: "Orange", hex: "#e2984b" }, { name: "Grey", hex: "#8a8a8a" },
+  { name: "Pink", hex: "#d9769e" }, { name: "Purple", hex: "#6b4d8a" },
+];
+
+function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTeammates = [], onSaveGuestTeammate, onClose, onConfirmShots, onConfirmGuestShots, onConfirmTeammateShots }) {
+  // The setup stage only exists for match-kind detection (match is present)
+  // -- training-session detection has no opponent keeper and no teammate
+  // connections, so it skips straight to scanning exactly as before. See
+  // "Identify keepers in AI shot detection", parts 1-2.
+  const [stage, setStage] = useState(match ? "setup" : "scanning"); // setup | scanning | analyzing | review | failed
   const [scanProgress, setScanProgress] = useState(0);
   const [analyzeProgress, setAnalyzeProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState(null);
-  const [results, setResults] = useState([]); // { id, t, thumbnail, outcome, zone, confidence, shotType, shotTypeConfidence, reason, included }
+  const [results, setResults] = useState([]); // { id, t, thumbnail, outcome, zone, confidence, shotType, shotTypeConfidence, attributedTo, attributionReason, included }
   const [usageTotals, setUsageTotals] = useState({ inputTokens: 0, outputTokens: 0, calls: 0 });
   const [scanStats, setScanStats] = useState(null);
   const cancelledRef = useRef(false);
 
+  // Setup-stage state
+  const [connections, setConnections] = useState([]); // fetched once, same pattern MatchSetupScreen already uses
+  const [viewerId, setViewerId] = useState(null);
+  const [kitColor, setKitColor] = useState(match?.keeperKitColor || null);
+  const [customHex, setCustomHex] = useState("#888888");
+  const [multipleKeepers, setMultipleKeepers] = useState(null); // null | true | false
+  const [splitMethod, setSplitMethod] = useState("ranges"); // ranges | jersey
+  const [newGuestName, setNewGuestName] = useState("");
+  const [addingGuest, setAddingGuest] = useState(false);
+  const videoElRef = useRef(null);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [ranges, setRanges] = useState([{ id: "r0", start: 0, end: Infinity, identityKey: "me" }]);
+  const [jerseyNumbers, setJerseyNumbers] = useState({}); // { [identityKey]: "7" }
+
   useEffect(() => {
+    if (!match) return;
+    let cancelled = false;
+    getMyConnections().then((rows) => { if (!cancelled) setConnections(rows); }).catch(() => setConnections([]));
+    supabase.auth.getUser().then(({ data }) => { if (!cancelled) setViewerId(data.user?.id || null); });
+    return () => { cancelled = true; };
+  }, [match]);
+
+  // Not filtered to "recording rights granted" the way MatchSetupScreen's
+  // live switch is -- attributing a shot to a teammate here just writes to
+  // their match via the same RPC a live "now recording for" switch already
+  // uses, so any accepted connection is fair game, not only ones with an
+  // active grant (that grant is about who can START a live recording, not
+  // who a review step can hand already-detected shots to).
+  const teammateIdentities = (connections || [])
+    .filter((c) => c.status === "accepted")
+    .map((c) => partnerOf(c, viewerId))
+    .map((p) => ({ key: `teammate:${p.id}`, label: p.email, type: "teammate", ownerId: p.id, email: p.email }));
+  const guestIdentities = guestTeammates.map((g) => ({ key: `guest:${g.id}`, label: g.name, type: "guest", id: g.id, name: g.name }));
+  const otherIdentities = [...teammateIdentities, ...guestIdentities];
+  const allIdentities = [{ key: "me", label: "Me", type: "me" }, ...otherIdentities];
+
+  function addGuestInline() {
+    const name = newGuestName.trim();
+    if (!name) return;
+    const entry = { id: uid(), name, jerseyNumber: null };
+    onSaveGuestTeammate(entry);
+    setNewGuestName("");
+    setAddingGuest(false);
+    return entry;
+  }
+
+  function addSplitHere() {
+    const t = videoElRef.current?.currentTime;
+    if (t == null) return;
+    setRanges((prev) => {
+      const idx = prev.findIndex((r) => t >= r.start && t < r.end);
+      if (idx === -1) return prev;
+      const r = prev[idx];
+      if (t - r.start < 1 || r.end - t < 1) return prev; // too close to an edge to be a meaningful split
+      const before = { ...r, end: t };
+      const after = { id: uid(), start: t, end: r.end, identityKey: "me" };
+      return [...prev.slice(0, idx), before, after, ...prev.slice(idx + 1)];
+    });
+  }
+  function removeRange(id) {
+    setRanges((prev) => {
+      if (prev.length <= 1) return prev;
+      const idx = prev.findIndex((r) => r.id === id);
+      if (idx === -1) return prev;
+      if (idx === 0) {
+        const [removed, next, ...rest] = prev;
+        return [{ ...next, start: removed.start }, ...rest];
+      }
+      const before = prev[idx - 1];
+      const removed = prev[idx];
+      return [...prev.slice(0, idx - 1), { ...before, end: removed.end }, ...prev.slice(idx + 1)];
+    });
+  }
+  function setRangeIdentity(id, identityKey) {
+    setRanges((prev) => prev.map((r) => (r.id === id ? { ...r, identityKey } : r)));
+  }
+
+  function beginDetection() {
+    if (match && kitColor) onSaveMatch({ ...match, keeperKitColor: kitColor });
+    setStage("scanning");
+    runDetection();
+  }
+
+  const hasSplit = multipleKeepers && otherIdentities.length > 0;
+  const usingRanges = hasSplit && splitMethod === "ranges" && ranges.length > 1;
+  const usingJersey = hasSplit && splitMethod === "jersey" && ranges.length <= 1;
+
+  // A plain async function, not a useEffect body -- it's triggered exactly
+  // once, either by the mount-effect below (training-kind, no setup stage)
+  // or by beginDetection's button click (match-kind, after setup). Keeping
+  // it out of a useEffect keyed on `stage` matters: this function calls
+  // setStage several times as it progresses (scanning -> analyzing ->
+  // review), and an effect dependent on `stage` would re-fire its own
+  // cleanup (cancelledRef.current = true) every time that happened,
+  // cancelling the scan moments after it started.
+  async function runDetection() {
     cancelledRef.current = false;
-    (async () => {
-      let signedUrl;
-      try {
-        signedUrl = await getSignedMatchVideoUrl(videoFile.path);
-      } catch (e) {
-        setError("Couldn't access the uploaded video — try again.");
-        setStage("failed");
-        return;
-      }
+    let signedUrl;
+    try {
+      signedUrl = await getSignedMatchVideoUrl(videoFile.path);
+    } catch (e) {
+      setError("Couldn't access the uploaded video — try again.");
+      setStage("failed");
+      return;
+    }
 
-      let scan;
-      try {
-        scan = await detectCandidateMoments(signedUrl, { onProgress: (p) => !cancelledRef.current && setScanProgress(p) });
-      } catch (e) {
-        setError(e.message || "Couldn't read the video file.");
-        setStage("failed");
-        return;
-      }
-      if (cancelledRef.current) return;
-      setScanStats(scan);
+    let scan;
+    try {
+      scan = await detectCandidateMoments(signedUrl, { onProgress: (p) => !cancelledRef.current && setScanProgress(p) });
+    } catch (e) {
+      setError(e.message || "Couldn't read the video file.");
+      setStage("failed");
+      return;
+    }
+    if (cancelledRef.current) return;
+    setScanStats(scan);
 
-      if (scan.candidates.length === 0) {
-        setResults([]);
-        setStage("review");
-        return;
-      }
-
-      setStage("analyzing");
-      setAnalyzeProgress({ done: 0, total: scan.candidates.length });
-
-      const video = document.createElement("video");
-      video.crossOrigin = "anonymous";
-      video.preload = "auto";
-      video.src = signedUrl;
-      video.muted = true;
-      await new Promise((resolve) => { video.onloadedmetadata = resolve; });
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-
-      const detected = [];
-      const totals = { inputTokens: 0, outputTokens: 0, calls: 0 };
-      for (let i = 0; i < scan.candidates.length; i++) {
-        if (cancelledRef.current) return;
-        const t = scan.candidates[i];
-        try {
-          const preFrame = await grabFrameJpeg(video, canvas, ctx, Math.max(0, t - 0.4));
-          const peakFrame = await grabFrameJpeg(video, canvas, ctx, t);
-          const detection = await detectShotAtMoment([preFrame, peakFrame], season);
-          totals.calls += 1;
-          totals.inputTokens += detection.usage.input_tokens || 0;
-          totals.outputTokens += detection.usage.output_tokens || 0;
-          if (detection.isShot) {
-            detected.push({
-              id: uid(),
-              t,
-              thumbnail: peakFrame,
-              outcome: detection.outcome || "Save",
-              zone: detection.zone || "MM",
-              confidence: detection.confidence,
-              // Beach shot-type is a suggestion only, never auto-included --
-              // it's a harder visual call than save/goal (per the brief),
-              // so it starts unset rather than pre-picking a guess the
-              // keeper has to notice and correct. shotTypeConfidence is kept
-              // alongside so the review UI can still show how sure Kip was
-              // when it does have a guess, without it affecting the overall
-              // "included" default the way outcome confidence does.
-              shotType: detection.shotTypeConfidence !== "low" ? detection.shotType : null,
-              shotTypeConfidence: detection.shotTypeConfidence,
-              reason: detection.reason,
-              included: detection.confidence !== "low",
-            });
-          }
-        } catch (e) {
-          // One failed candidate (network blip, etc.) doesn't abort the
-          // whole scan -- it's just skipped, same spirit as the rest of
-          // this pipeline being a best-effort suggestion pass.
-        }
-        if (!cancelledRef.current) {
-          setAnalyzeProgress({ done: i + 1, total: scan.candidates.length });
-          setUsageTotals({ ...totals });
-        }
-      }
-      if (cancelledRef.current) return;
-      setResults(detected);
+    if (scan.candidates.length === 0) {
+      setResults([]);
       setStage("review");
-    })();
+      return;
+    }
+
+    setStage("analyzing");
+    setAnalyzeProgress({ done: 0, total: scan.candidates.length });
+
+    const video = document.createElement("video");
+    video.crossOrigin = "anonymous";
+    video.preload = "auto";
+    video.src = signedUrl;
+    video.muted = true;
+    await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const detected = [];
+    const totals = { inputTokens: 0, outputTokens: 0, calls: 0 };
+    for (let i = 0; i < scan.candidates.length; i++) {
+      if (cancelledRef.current) return;
+      const t = scan.candidates[i];
+      try {
+        const preFrame = await grabFrameJpeg(video, canvas, ctx, Math.max(0, t - 0.4));
+        const peakFrame = await grabFrameJpeg(video, canvas, ctx, t);
+        const detection = await detectShotAtMoment([preFrame, peakFrame], season, {
+          keeperKitColor: kitColor?.name || null,
+          needsJerseyRead: usingJersey,
+        });
+        totals.calls += 1;
+        totals.inputTokens += detection.usage.input_tokens || 0;
+        totals.outputTokens += detection.usage.output_tokens || 0;
+        if (detection.isShot) {
+          // Kit color first: a "different" kit is almost always the
+          // opposition's own keeper, excluded by default regardless of
+          // any range/jersey attribution below -- see part 3a, "surface
+          // which keeper a shot was attributed to and why."
+          let attributedTo = "me";
+          let attributionReason = "default";
+          let excludedAsOpposition = false;
+          if (detection.keeperKit === "different") {
+            excludedAsOpposition = true;
+            attributionReason = "kit color";
+          } else if (usingRanges) {
+            const range = ranges.find((r) => t >= r.start && t < r.end) || ranges[0];
+            attributedTo = range.identityKey;
+            attributionReason = "time range";
+          } else if (usingJersey && detection.keeperJerseyNumber) {
+            const matchEntry = Object.entries(jerseyNumbers).find(([, num]) => num && num === detection.keeperJerseyNumber);
+            attributedTo = matchEntry ? matchEntry[0] : "me";
+            attributionReason = "jersey number";
+          }
+          detected.push({
+            id: uid(),
+            t,
+            thumbnail: peakFrame,
+            outcome: detection.outcome || "Save",
+            zone: detection.zone || "MM",
+            confidence: detection.confidence,
+            // Beach shot-type is a suggestion only, never auto-included --
+            // it's a harder visual call than save/goal (per the brief),
+            // so it starts unset rather than pre-picking a guess the
+            // keeper has to notice and correct. shotTypeConfidence is kept
+            // alongside so the review UI can still show how sure Kip was
+            // when it does have a guess, without it affecting the overall
+            // "included" default the way outcome confidence does.
+            shotType: detection.shotTypeConfidence !== "low" ? detection.shotType : null,
+            shotTypeConfidence: detection.shotTypeConfidence,
+            reason: detection.reason,
+            attributedTo,
+            attributionReason,
+            // A jersey-derived attribution is flagged unverified regardless
+            // of keeperJerseyConfidence, per the brief -- it's meaningfully
+            // less trustworthy than kit color or time ranges (camera
+            // distance/angle/motion blur), so it never gets to look as
+            // confident as those two just because the model reported
+            // "high." Confirmed accuracy of this path hasn't actually been
+            // tested against real footage -- see DECISIONS.md.
+            included: excludedAsOpposition ? false : (attributionReason === "jersey number" ? false : detection.confidence !== "low"),
+          });
+        }
+      } catch (e) {
+        // One failed candidate (network blip, etc.) doesn't abort the
+        // whole scan -- it's just skipped, same spirit as the rest of
+        // this pipeline being a best-effort suggestion pass.
+      }
+      if (!cancelledRef.current) {
+        setAnalyzeProgress({ done: i + 1, total: scan.candidates.length });
+        setUsageTotals({ ...totals });
+      }
+    }
+    if (cancelledRef.current) return;
+    setResults(detected);
+    setStage("review");
+  }
+
+  useEffect(() => {
+    if (match) return; // match-kind starts detection from beginDetection instead, after setup
+    runDetection();
     return () => { cancelledRef.current = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Belt-and-braces unmount guard for the match-kind path, where
+  // runDetection is kicked off from a button click (beginDetection) rather
+  // than an effect, so it has no effect cleanup of its own to cancel it if
+  // the modal is closed mid-scan.
+  useEffect(() => () => { cancelledRef.current = true; }, []);
 
   function updateResult(id, patch) {
     setResults(results.map((r) => (r.id === id ? { ...r, ...patch } : r)));
@@ -7186,9 +7576,11 @@ function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) 
   }
 
   function confirm() {
-    const shots = results
-      .filter((r) => r.included)
-      .map((r) => ({
+    const included = results.filter((r) => r.included);
+    const byIdentity = {};
+    included.forEach((r) => {
+      if (!byIdentity[r.attributedTo]) byIdentity[r.attributedTo] = [];
+      byIdentity[r.attributedTo].push({
         id: uid(),
         zone: r.zone,
         outcome: r.outcome,
@@ -7196,8 +7588,20 @@ function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) 
         videoTimestamp: formatElapsed(r.t * 1000),
         shooterNumber: null,
         position: null,
-      }));
-    onConfirmShots(shots);
+      });
+    });
+    Object.entries(byIdentity).forEach(([identityKey, shots]) => {
+      if (identityKey === "me" || !match) {
+        onConfirmShots(shots);
+      } else if (identityKey.startsWith("teammate:")) {
+        const ownerId = identityKey.slice("teammate:".length);
+        onConfirmTeammateShots?.({ ownerId, opponent: match.opponent, date: match.date, competition: match.competition, season: match.season, shots });
+      } else if (identityKey.startsWith("guest:")) {
+        const guestId = identityKey.slice("guest:".length);
+        onConfirmGuestShots?.({ guestId, opponent: match.opponent, date: match.date, competition: match.competition, season: match.season, shots });
+      }
+    });
+    onClose();
   }
 
   const estimatedCost = (usageTotals.inputTokens / 1e6) * SONNET_5_INPUT_PER_MTOK + (usageTotals.outputTokens / 1e6) * SONNET_5_OUTPUT_PER_MTOK;
@@ -7205,6 +7609,116 @@ function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) 
 
   return (
     <Modal onClose={onClose}>
+      {stage === "setup" && (
+        <div>
+          <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Before we scan</h3>
+          <p className="text-xs text-gray-500 mb-3">A couple of quick questions so detected shots go to the right person.</p>
+
+          <div className="mb-4">
+            <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Your goalkeeper kit color</div>
+            <p className="text-xs text-gray-500 mb-2">Frames showing a goalkeeper in a different color are treated as the opposition's keeper and excluded automatically.</p>
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {KIT_COLOR_PRESETS.map((c) => (
+                <button
+                  key={c.name}
+                  onClick={() => setKitColor(c)}
+                  className="w-9 h-9 rounded-full border-2 flex items-center justify-center"
+                  style={{ background: c.hex, borderColor: kitColor?.name === c.name ? "#0E8388" : "#DAD7CC" }}
+                  title={c.name}
+                >
+                  {kitColor?.name === c.name && <Check size={14} color={c.name === "White" || c.name === "Yellow" ? "#12213A" : "#fff"} />}
+                </button>
+              ))}
+              <label className="w-9 h-9 rounded-full border-2 flex items-center justify-center cursor-pointer" style={{ background: customHex, borderColor: kitColor?.hex === customHex && !KIT_COLOR_PRESETS.some((c) => c.name === kitColor?.name) ? "#0E8388" : "#DAD7CC" }}>
+                <input type="color" value={customHex} className="opacity-0 w-0 h-0" onChange={(e) => { setCustomHex(e.target.value); setKitColor({ name: "Other", hex: e.target.value }); }} />
+                <Pencil size={12} color="#fff" />
+              </label>
+            </div>
+            {kitColor && <div className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Selected: {kitColor.name}</div>}
+          </div>
+
+          {allIdentities.length > 1 && (
+            <div className="mb-4">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Does another keeper appear in this same footage, in the same kit?</div>
+              <div className="flex gap-2 mb-3">
+                <button onClick={() => setMultipleKeepers(false)} className="flex-1 py-2 rounded-lg text-xs font-bold border" style={multipleKeepers === false ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>No — just me</button>
+                <button onClick={() => setMultipleKeepers(true)} className="flex-1 py-2 rounded-lg text-xs font-bold border" style={multipleKeepers === true ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>Yes</button>
+              </div>
+
+              {multipleKeepers && (
+                <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+                  <div className="flex gap-2 mb-3">
+                    <button onClick={() => setSplitMethod("ranges")} className="flex-1 py-1.5 rounded-lg text-[11px] font-bold border" style={splitMethod === "ranges" ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>Mark time ranges</button>
+                    <button onClick={() => setSplitMethod("jersey")} className="flex-1 py-1.5 rounded-lg text-[11px] font-bold border" style={splitMethod === "jersey" ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>Use jersey numbers</button>
+                  </div>
+
+                  {splitMethod === "ranges" ? (
+                    <div>
+                      <p className="text-[11px] text-gray-500 mb-2">Play the video, pause where the keeper changes, and split — the default method, most reliable.</p>
+                      <video ref={videoElRef} src={match?.videoUrl || undefined} controls className="w-full rounded-lg mb-2 bg-black" onLoadedMetadata={(e) => { setVideoDuration(e.currentTarget.duration); setRanges((prev) => prev.map((r) => (r.end === Infinity ? { ...r, end: e.currentTarget.duration } : r))); }} />
+                      <button onClick={addSplitHere} className="w-full py-2 rounded-lg text-xs font-bold border mb-3" style={{ borderColor: "#0E8388", color: "#0E8388" }}>Split here</button>
+                      <div className="space-y-1.5">
+                        {ranges.map((r) => (
+                          <div key={r.id} className="rounded-md border p-2" style={{ borderColor: "#DAD7CC" }}>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="text-[11px] font-bold" style={{ color: "#12213A" }}>{formatElapsed(r.start * 1000)}–{r.end === Infinity ? "end" : formatElapsed(r.end * 1000)}</div>
+                              {ranges.length > 1 && <IconButton icon={X} size={12} label="Remove split" onClick={() => removeRange(r.id)} color="#C1483B" pad={7} />}
+                            </div>
+                            <div className="flex flex-wrap gap-1">
+                              {allIdentities.map((idn) => (
+                                <button key={idn.key} onClick={() => setRangeIdentity(r.id, idn.key)} className="px-2 py-1 rounded text-[10px] font-bold border" style={r.identityKey === idn.key ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>{idn.label}</button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-[11px] text-gray-500 mb-2">
+                        Jersey numbers are read from video automatically -- camera distance and angle make this less reliable than time ranges, so treat any match here as a suggestion to double-check, not a fact. Enter each keeper's number for this video only.
+                      </p>
+                      <div className="space-y-1.5">
+                        {allIdentities.map((idn) => (
+                          <div key={idn.key} className="flex items-center gap-2">
+                            <div className="flex-1 text-xs font-semibold" style={{ color: "#12213A" }}>{idn.label}</div>
+                            <input
+                              className="input"
+                              style={{ width: "70px" }}
+                              placeholder="#"
+                              value={jerseyNumbers[idn.key] || ""}
+                              onChange={(e) => setJerseyNumbers({ ...jerseyNumbers, [idn.key]: e.target.value.trim() })}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="mb-4">
+            {addingGuest ? (
+              <div className="flex items-center gap-2">
+                <input className="input flex-1" placeholder="Teammate's name" value={newGuestName} onChange={(e) => setNewGuestName(e.target.value)} />
+                <button onClick={addGuestInline} className="px-3 py-2 rounded-lg text-white text-xs font-bold shrink-0" style={{ background: "#0E8388" }}>Add</button>
+              </div>
+            ) : (
+              <button onClick={() => setAddingGuest(true)} className="text-[11px] font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
+                <Plus size={12} /> Add a teammate who doesn't use Keepr
+              </button>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <button onClick={onClose} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Cancel</button>
+            <button onClick={beginDetection} disabled={!kitColor} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40" style={{ background: "#0E8388" }}>Start scan</button>
+          </div>
+        </div>
+      )}
+
       {stage === "scanning" && (
         <div className="py-8 text-center">
           <div className="text-sm font-bold mb-2" style={{ color: "#12213A" }}>Scanning video for action…</div>
@@ -7297,6 +7811,35 @@ function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) 
                           </button>
                         ))}
                       </div>
+                      {match && (allIdentities.length > 1 || r.attributionReason === "kit color") && (
+                        <div className="mb-1.5">
+                          <div className="flex items-center gap-1 mb-1">
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Attributed to</span>
+                            <span className="text-[9px] font-semibold" style={{ color: "#68655B" }}>
+                              ({r.attributionReason === "jersey number" ? "guessed from jersey number — verify" : r.attributionReason})
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {allIdentities.map((idn) => (
+                              <button
+                                key={idn.key}
+                                onClick={() => updateResult(r.id, { attributedTo: idn.key, included: true })}
+                                className="px-2 py-1 rounded text-[10px] font-bold border"
+                                style={r.attributedTo === idn.key && r.included ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC", color: "#12213A" }}
+                              >
+                                {idn.label}
+                              </button>
+                            ))}
+                            <button
+                              onClick={() => updateResult(r.id, { included: false })}
+                              className="px-2 py-1 rounded text-[10px] font-bold border"
+                              style={!r.included ? { background: "#C1483B", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC", color: "#68655B" }}
+                            >
+                              Opposition keeper (exclude)
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       {season === "Summer" && (
                         <div className="mb-1.5">
                           <div className="flex items-center gap-1 mb-1">
@@ -7350,7 +7893,7 @@ function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) 
   );
 }
 
-function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [], onSaveOpponentRoster }) {
+function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots }) {
   const [zoneTap, setZoneTap] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [rosterOpen, setRosterOpen] = useState(false);
@@ -7390,6 +7933,11 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
               <UserPlus size={11} /> Recorded by {match.recordedByEmail || "a teammate"} — edit anything below to correct it
             </div>
           )}
+          {match.recordedForGuestId && (
+            <div className="flex items-center gap-1 text-[11px] font-semibold mt-0.5" style={{ color: "#0E8388" }}>
+              <Users size={11} /> Recorded for {guestTeammates.find((g) => g.id === match.recordedForGuestId)?.name || "a teammate"} — not counted in your own stats
+            </div>
+          )}
           <OpponentHistoryNote matches={matches} opponent={match.opponent} excludeId={match.id} roster={findOpponentRoster(opponents, match.opponent)?.roster} onTap={() => setRosterOpen(true)} />
         </div>
         <SeasonBadge season={match.season} />
@@ -7413,11 +7961,17 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
         <VideoShotDetectionFlow
           videoFile={match.videoFile}
           season={match.season}
+          match={match}
+          onSaveMatch={onSave}
+          guestTeammates={guestTeammates}
+          onSaveGuestTeammate={onSaveGuestTeammate}
           onClose={() => setShowDetection(false)}
           onConfirmShots={(newShots) => {
             onSave({ ...match, shots: [...(match.shots || []), ...newShots] });
             setShowDetection(false);
           }}
+          onConfirmGuestShots={onConfirmGuestShots}
+          onConfirmTeammateShots={onConfirmTeammateShots}
         />
       )}
 
@@ -7526,7 +8080,7 @@ function MatchWrapUpModal({ match, durationMinutes, onClose, onSave }) {
   );
 }
 
-function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete, profile, season, plans, matches, adHocSessions, exercises, onOpenKip, teammateOwnerId, teammateEmail }) {
+function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onExit, onDelete, profile, season, plans, matches, adHocSessions, exercises, onOpenKip, teammateOwnerId, teammateEmail, guestId, guestName, onSaveGuestMatch }) {
   const [now, setNow] = useState(Date.now());
   const [zoneTap, setZoneTap] = useState(null);
   const [wrappingUp, setWrappingUp] = useState(false);
@@ -7547,6 +8101,11 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
   const [teammateWritePending, setTeammateWritePending] = useState(false);
   const [deleteStatus, setDeleteStatus] = useState("idle"); // idle | deleting | teammate-failed
   const [deleteError, setDeleteError] = useState(null);
+  // A guest teammate's match is local (no RLS/permission model needed --
+  // see "Identify keepers in AI shot detection", part 3), so unlike
+  // teammateMatch above there's no async create/write round trip or
+  // in-flight lock: onSaveGuestMatch is a synchronous state update.
+  const [guestMatch, setGuestMatch] = useState(null);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -7567,11 +8126,24 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teammateOwnerId]);
 
+  // Same "create/resume the moment it's linked" timing as the teammate
+  // effect above, just synchronous and local -- no network round trip for
+  // a guest record.
+  useEffect(() => {
+    if (!guestId) return;
+    const existing = matches.find((m) => m.recordedForGuestId === guestId
+      && normalizeOpponentName(m.opponent) === normalizeOpponentName(match.opponent) && m.date === match.date);
+    setGuestMatch(existing || { id: uid(), recordedForGuestId: guestId, opponent: match.opponent, date: match.date, competition: match.competition, season: match.season, result: "", shots: [] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guestId]);
+
   const recording = match.recording;
   const isPaused = !!recording?.pausedAt;
   const elapsed = recordingElapsedMs(recording, now);
 
-  const activeMatch = activeRecorder === "teammate" && teammateMatch ? teammateMatch : match;
+  const activeMatch = activeRecorder === "teammate" && teammateMatch ? teammateMatch
+    : activeRecorder === "guest" && guestMatch ? guestMatch
+    : match;
 
   const zones = emptyZoneMap();
   (activeMatch.shots || []).forEach((s) => {
@@ -7604,6 +8176,10 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
       patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
         .then((updated) => { setTeammateMatch(updated); setTeammateWritePending(false); })
         .catch((e) => teammateWriteFailed(e, `${teammateEmail}'s last shot didn't save`));
+    } else if (activeRecorder === "guest" && guestMatch) {
+      const updated = { ...guestMatch, shots: nextShots };
+      setGuestMatch(updated);
+      onSaveGuestMatch(updated);
     } else {
       onUpdatePatch({ shots: nextShots });
     }
@@ -7616,6 +8192,10 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
       patchTeammateMatch(teammateOwnerId, teammateMatch.id, { shots: nextShots })
         .then((updated) => { setTeammateMatch(updated); setTeammateWritePending(false); })
         .catch((e) => teammateWriteFailed(e, "couldn't update their match"));
+    } else if (activeRecorder === "guest" && guestMatch) {
+      const updated = { ...guestMatch, shots: nextShots };
+      setGuestMatch(updated);
+      onSaveGuestMatch(updated);
     } else {
       onUpdatePatch({ shots: nextShots });
     }
@@ -7679,7 +8259,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
         </div>
       </div>
 
-      {teammateOwnerId && (
+      {(teammateOwnerId || guestId) && (
         <div className="shrink-0 px-4 pt-3 bg-white">
           <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Now recording for</div>
           <div className="flex rounded-lg border p-1" style={{ borderColor: "#DAD7CC" }}>
@@ -7692,15 +8272,28 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
             >
               Me
             </button>
-            <button
-              disabled={!teammateMatch || teammateWritePending}
-              onClick={() => setActiveRecorder("teammate")}
-              aria-pressed={activeRecorder === "teammate"}
-              className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
-              style={activeRecorder === "teammate" ? { background: "#0E8388", color: "#fff" } : { color: "#68655B" }}
-            >
-              {teammateMatch ? teammateEmail : "Setting up…"}
-            </button>
+            {teammateOwnerId && (
+              <button
+                disabled={!teammateMatch || teammateWritePending}
+                onClick={() => setActiveRecorder("teammate")}
+                aria-pressed={activeRecorder === "teammate"}
+                className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
+                style={activeRecorder === "teammate" ? { background: "#0E8388", color: "#fff" } : { color: "#68655B" }}
+              >
+                {teammateMatch ? teammateEmail : "Setting up…"}
+              </button>
+            )}
+            {guestId && (
+              <button
+                disabled={!guestMatch}
+                onClick={() => setActiveRecorder("guest")}
+                aria-pressed={activeRecorder === "guest"}
+                className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
+                style={activeRecorder === "guest" ? { background: "#0E8388", color: "#fff" } : { color: "#68655B" }}
+              >
+                {guestName} <span className="opacity-70">· no Keepr</span>
+              </button>
+            )}
           </div>
           {teammateError && (
             <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-2">
@@ -8522,7 +9115,7 @@ function TrainingSessionDetail({ session, kind, season, exercises, onSaveSession
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, onOpenTrainingSetup, onSavePlan, onSaveAdHoc, profile, onSaveProfile, reports = [], onReportGenerated, onOpenHelp, onOpenMatchSetup }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots, onOpenLiveRecorder, onOpenTrainingSetup, onSavePlan, onSaveAdHoc, profile, onSaveProfile, reports = [], onReportGenerated, onOpenHelp, onOpenMatchSetup }) {
   const [openMatchId, setOpenMatchId] = useState(null);
   const [openTrainingId, setOpenTrainingId] = useState(null);
   // Match and Training are kept as two genuinely separate views, not a
@@ -8572,7 +9165,21 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
 
   const openMatch = matches.find((m) => m.id === openMatchId);
   if (openMatch) {
-    return <MatchDetail match={openMatch} matches={matches} onBack={() => setOpenMatchId(null)} onSave={onSave} onDelete={onDelete} opponents={opponents} onSaveOpponentRoster={onSaveOpponentRoster} />;
+    return (
+      <MatchDetail
+        match={openMatch}
+        matches={matches}
+        onBack={() => setOpenMatchId(null)}
+        onSave={onSave}
+        onDelete={onDelete}
+        opponents={opponents}
+        onSaveOpponentRoster={onSaveOpponentRoster}
+        guestTeammates={guestTeammates}
+        onSaveGuestTeammate={onSaveGuestTeammate}
+        onConfirmGuestShots={onConfirmGuestShots}
+        onConfirmTeammateShots={onConfirmTeammateShots}
+      />
+    );
   }
 
   // Chained right after "Add match" creates a match logged after the fact —
@@ -8623,16 +9230,26 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
     }
   }
 
-  const agg = aggregateMatchStats(matches, filter);
-  const shotTypeAgg = filter !== "Winter" ? aggregateShotTypeStats(matches.filter((m) => filter === "All" || m.season === filter)) : {};
-  const positionAgg = filter !== "Summer" ? aggregatePositionStats(matches.filter((m) => filter === "All" || m.season === filter)) : {};
+  // Never the recording user's own numbers if a match was recorded FOR a
+  // guest teammate (match.recordedForGuestId) -- see myMatches in
+  // kipDomain.js and the "Recorded for" section below, which is the only
+  // place those matches are shown. matches itself stays the full array
+  // (openMatch/footageStepMatch/inProgressMatch above all deliberately
+  // still read from it, since opening or resuming a match doesn't care
+  // whose stats it belongs to).
+  const myOwnMatches = myMatches(matches);
+  const guestMatches = matches.filter((m) => m.recordedForGuestId);
+
+  const agg = aggregateMatchStats(myOwnMatches, filter);
+  const shotTypeAgg = filter !== "Winter" ? aggregateShotTypeStats(myOwnMatches.filter((m) => filter === "All" || m.season === filter)) : {};
+  const positionAgg = filter !== "Summer" ? aggregatePositionStats(myOwnMatches.filter((m) => filter === "All" || m.season === filter)) : {};
   const hasData = agg.totalSaves + agg.totalGoals > 0;
   const overallSavePct = hasData ? Math.round((agg.totalSaves / (agg.totalSaves + agg.totalGoals)) * 100) : 0;
   const zoneEntries = Object.entries(agg.zones).filter(([, z]) => z.saves + z.goals > 0);
   const best = zoneEntries.length ? [...zoneEntries].sort((a, b) => (b[1].saves / (b[1].saves + b[1].goals)) - (a[1].saves / (a[1].saves + a[1].goals)))[0] : null;
   const worst = zoneEntries.length ? [...zoneEntries].sort((a, b) => (a[1].saves / (a[1].saves + a[1].goals)) - (b[1].saves / (b[1].saves + b[1].goals)))[0] : null;
 
-  const sortedMatches = [...matches].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const sortedMatches = [...myOwnMatches].sort((a, b) => new Date(b.date) - new Date(a.date));
 
   const trainingAgg = aggregateTrainingStats(trainingRecords, filter);
   const trainingShotTypeAgg = filter !== "Winter" ? aggregateShotTypeStats(trainingRecords.filter((r) => filter === "All" || r.season === filter)) : {};
@@ -8857,12 +9474,48 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
             })}
           </div>
 
+          {/* Guest-teammate matches, deliberately never mixed into the list or
+              numbers above — a guest's saves are not the user's saves, same
+              non-blending discipline as Winter/Summer and Match/Training. See
+              "Identify keepers in AI shot detection", part 3. Grouped by
+              guest since one recording session could plausibly cover more
+              than one guest across different matches. */}
+          {guestMatches.length > 0 && (
+            <div className="mt-5">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Recorded for a teammate</div>
+              <div className="space-y-2">
+                {[...guestMatches].sort((a, b) => new Date(b.date) - new Date(a.date)).map((m) => {
+                  const shots = m.shots || [];
+                  const saves = shots.filter((s) => s.outcome === "Save").length;
+                  const guestName = guestTeammates.find((g) => g.id === m.recordedForGuestId)?.name || "a teammate";
+                  return (
+                    <button key={m.id} onClick={() => setOpenMatchId(m.id)} className="w-full text-left bg-white rounded-lg border p-3 flex items-center justify-between" style={{ borderColor: "#DAD7CC" }}>
+                      <div>
+                        <div className="text-sm font-bold" style={{ color: "#12213A" }}>vs {m.opponent}</div>
+                        <div className="text-[11px] text-gray-500">{m.date}{m.result ? ` · ${m.result}` : ""} · {shots.length ? `${saves}/${shots.length} saved` : "No shots logged"}</div>
+                        <div className="flex items-center gap-1 text-[10px] font-semibold mt-0.5" style={{ color: "#0E8388" }}>
+                          <Users size={10} /> Recorded for {guestName}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <SeasonBadge season={m.season} />
+                        <ChevronRight size={16} color="#DAD7CC" />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {showForm && (
             <MatchFormModal
               season={season}
               matches={matches}
               opponents={opponents}
               onSaveOpponentRoster={onSaveOpponentRoster}
+              guestTeammates={guestTeammates}
+              onSaveGuestTeammate={onSaveGuestTeammate}
               onClose={() => setShowForm(false)}
               onSave={(m) => { onSave(m); setShowForm(false); setFootageStepMatchId(m.id); }}
             />
