@@ -7971,7 +7971,16 @@ function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatc
     );
   }
 
-  if (step === "footage" && needsFootageStep) {
+  // Deliberately just `step === "footage"`, not also `&& needsFootageStep`:
+  // needsFootageStep is derived live from `match.videoFile`, which flips to
+  // truthy the instant a file finishes uploading inside FootagePromptStep
+  // below. Gating the render on it too meant a successful upload made this
+  // whole step vanish mid-render — the keeper who just uploaded footage got
+  // yanked straight to the report step before they could tap "Detect shots
+  // now", which is the entire reason this step exists. needsFootageStep
+  // still does its real job above: deciding whether to route into "footage"
+  // in the first place.
+  if (step === "footage") {
     return (
       <FootagePromptStep
         match={match}
