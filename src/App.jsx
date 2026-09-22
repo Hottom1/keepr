@@ -2161,6 +2161,7 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
   const [adHocLogTarget, setAdHocLogTarget] = useState(null); // adHocSession
   const [confirmDeleteAdHoc, setConfirmDeleteAdHoc] = useState(null);
   const [matchFormDate, setMatchFormDate] = useState(null); // date string, non-null means "open match form"
+  const [footageStepMatchId, setFootageStepMatchId] = useState(null);
   const [reviewingSuggestion, setReviewingSuggestion] = useState(false);
 
   const editingPlan = plans.find((p) => p.id === editingId);
@@ -2691,9 +2692,25 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
           opponents={opponents}
           onSaveOpponentRoster={onSaveOpponentRoster}
           onClose={() => setMatchFormDate(null)}
-          onSave={(m) => { onSaveMatch(m); setMatchFormDate(null); }}
+          onSave={(m) => { onSaveMatch(m); setMatchFormDate(null); setFootageStepMatchId(m.id); }}
         />
       )}
+
+      {/* Covers the keeper adding a past game straight from the calendar who
+          already has footage but hasn't stat-tracked it yet — same prompt
+          StatsTab's "Add match" gives, and the same one a live-recorded
+          match gets in PostRecordingFlow. */}
+      {(() => {
+        const footageStepMatch = matches.find((m) => m.id === footageStepMatchId);
+        if (!footageStepMatch) return null;
+        return (
+          <FootagePromptStep
+            match={footageStepMatch}
+            onSaveMatch={onSaveMatch}
+            onContinue={() => setFootageStepMatchId(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -7825,17 +7842,21 @@ function ReportPromptStep({ profile, onSaveProfile, plans, season, matches, exer
 // a connected teammate only) -> report prompt -> done. Every step but the
 // last is a quick glance-and-continue over already-saved data; only the
 // report step is explicitly skippable-with-no-action, per the brief.
-// Chained into PostRecordingFlow, not a separate prompt mechanism — same
-// full-screen step pattern as MatchReviewStep/TrainingReviewStep, including
-// the same "Skip" escape hatch. Its job is just to get footage attached to
-// the match; actually running detection stays on the match-detail screen
-// (the "Detect shots from video" card MatchVideoPanel already shows once a
-// file exists), so this step doesn't duplicate that whole scanning/review
-// pipeline inline.
+// Chained into PostRecordingFlow after a live-recorded match, and also used
+// standalone right after creating a match "after the fact" (StatsTab's Add
+// match form) — same component either way, since both cases are "a match
+// now exists, has the keeper got footage for it?". Unlike the original
+// version, uploading here lets you run detection immediately (reusing
+// VideoShotDetectionFlow, the same pipeline MatchDetail's own "Detect shots
+// from video" card uses) instead of just marking the file attached and
+// silently moving on — a keeper who came here specifically to hand over
+// footage shouldn't have to go find the match again afterward to do
+// anything with it.
 function FootagePromptStep({ match, onSaveMatch, onContinue }) {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
-  const [uploaded, setUploaded] = useState(false);
+  const [showDetection, setShowDetection] = useState(false);
+  const hasFile = !!match.videoFile;
 
   async function handleFileSelect(e) {
     const file = e.target.files?.[0];
@@ -7845,13 +7866,26 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
     try {
       const meta = await uploadMatchVideo(match.id, file);
       onSaveMatch({ ...match, videoFile: meta });
-      setUploaded(true);
     } catch (err) {
       setUploadError(err.message || "Upload failed — try again.");
     } finally {
       setUploading(false);
       e.target.value = "";
     }
+  }
+
+  if (showDetection && match.videoFile) {
+    return (
+      <VideoShotDetectionFlow
+        videoFile={match.videoFile}
+        onClose={() => setShowDetection(false)}
+        onConfirmShots={(newShots) => {
+          onSaveMatch({ ...match, shots: [...(match.shots || []), ...newShots] });
+          setShowDetection(false);
+          onContinue();
+        }}
+      />
+    );
   }
 
   return (
@@ -7865,10 +7899,13 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
       </div>
       <div className="flex-1 overflow-y-auto px-5 py-6 flex flex-col items-center justify-center text-center">
         <Sparkles size={28} color="#0E8388" className="mb-3" />
-        {uploaded ? (
+        {hasFile ? (
           <>
             <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Footage attached</div>
-            <p className="text-xs text-gray-500 max-w-xs">You can run AI shot detection any time from this match's page in Match stats.</p>
+            <p className="text-xs text-gray-500 mb-4 max-w-xs">Run AI shot detection now, or come back to it later from this match's page in Match stats.</p>
+            <button onClick={() => setShowDetection(true)} className="flex items-center justify-center gap-1.5 px-5 py-3 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+              <Sparkles size={15} /> Detect shots now
+            </button>
           </>
         ) : (
           <>
@@ -7884,7 +7921,7 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
       </div>
       <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
         <button onClick={onContinue} className="w-full py-3.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
-          {uploaded ? "Continue" : "Not now — continue"}
+          {hasFile ? "Continue without detecting" : "Not now — continue"}
         </button>
       </div>
     </div>
@@ -8157,6 +8194,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
   // number. See DECISIONS.md, "Training shot stats & detection".
   const [statsView, setStatsView] = useState("match");
   const [showForm, setShowForm] = useState(false);
+  const [footageStepMatchId, setFootageStepMatchId] = useState(null);
   const [filter, setFilter] = useState(season);
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportError, setReportError] = useState(null);
@@ -8196,6 +8234,21 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
   const openMatch = matches.find((m) => m.id === openMatchId);
   if (openMatch) {
     return <MatchDetail match={openMatch} matches={matches} onBack={() => setOpenMatchId(null)} onSave={onSave} onDelete={onDelete} opponents={opponents} onSaveOpponentRoster={onSaveOpponentRoster} />;
+  }
+
+  // Chained right after "Add match" creates a match logged after the fact —
+  // covers the keeper who already has footage from a game they haven't
+  // stat-tracked yet, same footage/detection prompt a live-recorded match
+  // already gets in PostRecordingFlow, just entered from the other side.
+  const footageStepMatch = matches.find((m) => m.id === footageStepMatchId);
+  if (footageStepMatch) {
+    return (
+      <FootagePromptStep
+        match={footageStepMatch}
+        onSaveMatch={onSave}
+        onContinue={() => { setFootageStepMatchId(null); setOpenMatchId(footageStepMatch.id); }}
+      />
+    );
   }
 
   const trainingRecords = buildTrainingShotRecords({ plans, adHocSessions });
@@ -8472,7 +8525,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
               opponents={opponents}
               onSaveOpponentRoster={onSaveOpponentRoster}
               onClose={() => setShowForm(false)}
-              onSave={(m) => { onSave(m); setShowForm(false); setOpenMatchId(m.id); }}
+              onSave={(m) => { onSave(m); setShowForm(false); setFootageStepMatchId(m.id); }}
             />
           )}
         </>
