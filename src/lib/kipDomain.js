@@ -48,10 +48,13 @@ export const ZONE_LABELS = {
 // Indoor: every goal is worth 1 point regardless of shot type — these tags are context only.
 export const INDOOR_SHOT_TYPES = ["Wing", "9m", "6m", "Fast break", "7m Penalty", "Other"];
 
-// Beach handball: a regular goal is 1 point. Spin/360, in-flight, a specialist/goalkeeper
+// Beach handball: a regular goal is 1 point. Spin/360, alley-oop, a specialist/goalkeeper
 // goal, and a 6m penalty goal are each worth 2 points under IHF beach handball rules.
-export const BEACH_SHOT_TYPES = ["Regular", "Spin / 360", "In-flight", "Specialist / GK goal", "6m Penalty"];
-export const BEACH_TWO_POINT_TYPES = ["Spin / 360", "In-flight", "Specialist / GK goal", "6m Penalty"];
+// "Alley-oop" was previously labeled "In-flight" -- same technique (a teammate lobs the
+// ball for an in-air catch-and-score), renamed for accuracy. Existing stored shots were
+// migrated to the new label (see DECISIONS.md), so this is the only name in the app now.
+export const BEACH_SHOT_TYPES = ["Regular", "Spin / 360", "Alley-oop", "Specialist / GK goal", "6m Penalty"];
+export const BEACH_TWO_POINT_TYPES = ["Spin / 360", "Alley-oop", "Specialist / GK goal", "6m Penalty"];
 
 export function shotTypesFor(season) {
   return season === "Summer" ? BEACH_SHOT_TYPES : INDOOR_SHOT_TYPES;
@@ -159,6 +162,11 @@ export function buildTrainingShotRecords({ plans = [], adHocSessions = [] } = {}
     });
   });
   (adHocSessions || []).forEach((session) => {
+    // A gym workout (item 1, "Record Workout") is never shot-facing -- it has
+    // no shots or exercise-shots fields at all, so it would only ever land
+    // here via its title, showing up as an empty "no shots logged" row in a
+    // stats view about save% that doesn't apply to it. Excluded outright.
+    if (session.isWorkout) return;
     const exerciseShots = Object.values(session.exerciseShots || {}).flat();
     const shots = [...(session.shots || []), ...exerciseShots];
     if (shots.length === 0 && !session.title) return;
@@ -967,7 +975,7 @@ export function findActiveRecording({ plans, adHocSessions, matches }) {
     }
   }
   for (const s of adHocSessions || []) {
-    if (s.recording) return { kind: "adhoc", sessionId: s.id };
+    if (s.recording) return { kind: s.isWorkout ? "workout" : "adhoc", sessionId: s.id };
   }
   for (const m of matches || []) {
     if (m.recording) return { kind: "match", matchId: m.id };

@@ -534,6 +534,25 @@ export default function GKTrainerApp() {
     setPendingSetup(null);
   }
 
+  // A pure gym session — stored as an ad-hoc session (reusing its storage,
+  // findActiveRecording, and exerciseLogHistory's existing ad-hoc pathway for
+  // the progress graphs) but flagged isWorkout so it's routed to the
+  // dedicated LiveWorkoutRecorder instead of the general LiveSessionRecorder,
+  // and excluded from Training Stats (buildTrainingShotRecords), which is
+  // about shot-facing sessions only.
+  function beginWorkoutRecording({ title } = {}) {
+    const workoutSession = {
+      id: uid(), title: title?.trim() || "", notes: "", date: new Date().toISOString().slice(0, 10),
+      season, isWorkout: true,
+      exerciseIds: [], exerciseLogs: {},
+      completed: false, rpe: null, note: "", completedAt: null,
+      recording: startRecording(),
+    };
+    saveAdHocSession(workoutSession);
+    setActiveLiveTarget({ kind: "workout", sessionId: workoutSession.id });
+    setPendingSetup(null);
+  }
+
   function deleteMatch(id) {
     const next = matches.filter((m) => m.id !== id);
     updateAndSave({ nextMatches: next });
@@ -738,6 +757,7 @@ export default function GKTrainerApp() {
             onOpenLiveRecorder={setActiveLiveTarget}
             onOpenTrainingSetup={() => setPendingSetup({ kind: "training" })}
             onOpenMatchSetup={() => setPendingSetup({ kind: "match" })}
+            onOpenWorkoutSetup={() => setPendingSetup({ kind: "workout" })}
             onOpenHelp={() => openHelp("record-live")}
           />
         )}
@@ -886,6 +906,29 @@ export default function GKTrainerApp() {
         );
       })()}
 
+      {activeLiveTarget?.kind === "workout" && (() => {
+        const liveWorkout = adHocSessions.find((s) => s.id === activeLiveTarget.sessionId);
+        if (!liveWorkout) return null;
+        return (
+          <LiveWorkoutRecorder
+            session={liveWorkout}
+            exercises={allExercises}
+            onUpdatePatch={(patch) => saveAdHocSession({ ...liveWorkout, ...patch })}
+            onFinish={({ rpe, note, durationMinutes, title, exerciseLogs }) => {
+              const { recording, ...rest } = liveWorkout;
+              saveAdHocSession({ ...rest, completed: true, rpe, note, durationMinutes, title: title ?? rest.title, completedAt: new Date().toISOString(), exerciseLogs });
+              setActiveLiveTarget(null);
+              setPostRecordingFlow({ kind: "workout", sessionId: liveWorkout.id });
+            }}
+            onExit={() => setActiveLiveTarget(null)}
+            onDelete={() => {
+              deleteAdHocSession(liveWorkout.id);
+              setActiveLiveTarget(null);
+            }}
+          />
+        );
+      })()}
+
       {activeLiveTarget?.kind === "match" && (() => {
         const liveMatch = matches.find((m) => m.id === activeLiveTarget.matchId);
         if (!liveMatch) return null;
@@ -992,6 +1035,27 @@ export default function GKTrainerApp() {
         );
       })()}
 
+      {postRecordingFlow?.kind === "workout" && (() => {
+        const session = adHocSessions.find((s) => s.id === postRecordingFlow.sessionId);
+        if (!session) return null;
+        return (
+          <PostRecordingFlow
+            kind="workout"
+            session={session}
+            exercises={allExercises}
+            profile={profile}
+            onSaveProfile={saveProfile}
+            plans={plans}
+            season={season}
+            matches={matches}
+            adHocSessions={adHocSessions}
+            onUpdateSession={(patch) => saveAdHocSession({ ...session, ...patch })}
+            onReportGenerated={addReportAndNotify}
+            onClose={() => setPostRecordingFlow(null)}
+          />
+        );
+      })()}
+
       {postRecordingFlow?.kind === "match" && (() => {
         const match = matches.find((m) => m.id === postRecordingFlow.matchId);
         if (!match) return null;
@@ -1030,6 +1094,12 @@ export default function GKTrainerApp() {
           opponents={opponents}
           onSaveOpponentRoster={saveOpponentRoster}
           onStart={beginMatchRecording}
+          onClose={() => setPendingSetup(null)}
+        />
+      )}
+      {pendingSetup?.kind === "workout" && (
+        <WorkoutSetupScreen
+          onStart={beginWorkoutRecording}
           onClose={() => setPendingSetup(null)}
         />
       )}
@@ -2574,7 +2644,7 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
         {[...adHocSessions].sort((a, b) => new Date(a.date) - new Date(b.date)).map((s) => (
           <button
             key={s.id}
-            onClick={() => (s.recording ? onOpenLiveRecorder({ kind: "adhoc", sessionId: s.id }) : setAdHocLogTarget(s))}
+            onClick={() => (s.recording ? onOpenLiveRecorder({ kind: s.isWorkout ? "workout" : "adhoc", sessionId: s.id }) : setAdHocLogTarget(s))}
             className="w-full text-left bg-white rounded-lg border p-2.5 flex items-center justify-between"
             style={{ borderColor: s.recording ? "#0E8388" : "#DAD7CC", borderWidth: s.recording ? 2 : 1 }}
           >
@@ -2725,13 +2795,15 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
 // reachable via the setup screens below (TrainingSetupScreen/
 // MatchSetupScreen). This tab just offers "resume what's already running"
 // or "open a setup screen," never starts a recording itself.
-function RecordTab({ plans, adHocSessions, matches, onOpenLiveRecorder, onOpenTrainingSetup, onOpenMatchSetup, onOpenHelp }) {
+function RecordTab({ plans, adHocSessions, matches, onOpenLiveRecorder, onOpenTrainingSetup, onOpenMatchSetup, onOpenWorkoutSetup, onOpenHelp }) {
   const active = findActiveRecording({ plans, adHocSessions, matches });
 
   const resumeLabel = !active ? null
     : active.kind === "match"
       ? `Resume recording — vs ${matches.find((m) => m.id === active.matchId)?.opponent || "match"}`
-      : "Resume recording — training";
+      : active.kind === "workout"
+        ? "Resume recording — workout"
+        : "Resume recording — training";
 
   return (
     <div className="px-4 pt-4 pb-8">
@@ -2766,6 +2838,15 @@ function RecordTab({ plans, adHocSessions, matches, onOpenLiveRecorder, onOpenTr
             <div>
               <div className="font-bold text-sm" style={{ color: "#12213A" }}>Record match</div>
               <div className="text-xs text-gray-500 mt-0.5">Set the opponent, then track shots live from kickoff</div>
+            </div>
+          </button>
+          <button onClick={onOpenWorkoutSetup} className="w-full text-left bg-white rounded-lg border-2 p-4 flex items-center gap-3" style={{ borderColor: "#0E8388" }}>
+            <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#0E8388" }}>
+              <Dumbbell size={15} color="#fff" />
+            </div>
+            <div>
+              <div className="font-bold text-sm" style={{ color: "#12213A" }}>Record workout</div>
+              <div className="text-xs text-gray-500 mt-0.5">A pure gym session — log sets as you go, no exercise checklist</div>
             </div>
           </button>
         </div>
@@ -2833,6 +2914,47 @@ function TrainingSetupScreen({ plans, exercises, onStart, onClose }) {
           disabled={!valid}
           onClick={() => onStart({ title: title.trim(), focus })}
           className="w-full py-3.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2 disabled:opacity-40"
+          style={{ background: "#0E8388" }}
+        >
+          <span className="w-2.5 h-2.5 rounded-full" style={{ background: "#fff" }} /> Start
+        </button>
+      </div>
+      <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+    </div>
+  );
+}
+
+// Same "nothing created until Start" rule as TrainingSetupScreen, but there's
+// no "next due" branch here — a workout is always a standalone gym session,
+// never tied to a plan. Name is optional (unlike the training-session name,
+// which is required) since a gym session doesn't need an identity the way a
+// named training session or a match opponent does.
+function WorkoutSetupScreen({ onStart, onClose }) {
+  const [title, setTitle] = useState("");
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
+          <ArrowLeft size={14} /> Cancel
+        </button>
+        <div className="text-lg font-black text-white">Set up your workout</div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
+          <div className="text-[10px] font-bold uppercase tracking-wide mb-1" style={{ color: "#0E8388" }}>Gym session</div>
+          <p className="text-xs text-gray-500 mb-3">Add exercises and log sets as you go — no checklist, just the gym.</p>
+          <Field label="Name this workout (optional)">
+            <input className="input" placeholder="e.g. Tuesday gym session" value={title} onChange={(e) => setTitle(e.target.value)} />
+          </Field>
+        </div>
+      </div>
+
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button
+          onClick={() => onStart({ title })}
+          className="w-full py-3.5 rounded-lg text-sm font-bold text-white flex items-center justify-center gap-2"
           style={{ background: "#0E8388" }}
         >
           <span className="w-2.5 h-2.5 rounded-full" style={{ background: "#fff" }} /> Start
@@ -3669,6 +3791,150 @@ function LiveSessionRecorder({ session, kind, exercises, focus, onUpdatePatch, o
               if (gymLogs) Object.entries(gymLogs).forEach(([exerciseId, sets]) => { nextExerciseLogs[exerciseId] = sets; });
               onFinish({ rpe, note, durationMinutes, title, exerciseLogs: nextExerciseLogs });
             }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Deliberately NOT a thin wrapper around LiveSessionRecorder — that recorder
+// is built around walking a fixed or checklist-style exercise list (plan
+// steps, done/not-done, per-exercise shot logging), none of which fits a
+// pure gym session where the whole point is "add whatever exercise you're
+// about to do, log its sets, repeat." A dedicated flow keeps that checklist
+// machinery out of the way entirely. Reuses GymSetLogger (the exact same
+// set-by-set component every other gym-logging surface uses) and
+// LogSessionModal for the RPE/note/title finish step — no new logging UI,
+// per the brief. No shot logging anywhere here: a gym workout has no
+// shooter, so it's simply not offered, unlike a training session where
+// Partner/Team drills might have one.
+function LiveWorkoutRecorder({ session, exercises, onUpdatePatch, onFinish, onExit, onDelete }) {
+  const [now, setNow] = useState(Date.now());
+  const [picker, setPicker] = useState(false);
+  const [finishing, setFinishing] = useState(false);
+  const [confirmDeleting, setConfirmDeleting] = useState(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const recording = session.recording;
+  const isPaused = !!recording?.pausedAt;
+  const elapsed = recordingElapsedMs(recording, now);
+  const exerciseLogs = session.exerciseLogs || {};
+  const gymExerciseIds = session.exerciseIds || [];
+
+  function addExercise(ex) {
+    onUpdatePatch({ exerciseIds: [...gymExerciseIds, ex.id] });
+    setPicker(false);
+  }
+
+  function removeExercise(id) {
+    const { [id]: _removed, ...restLogs } = exerciseLogs;
+    onUpdatePatch({ exerciseIds: gymExerciseIds.filter((x) => x !== id), exerciseLogs: restLogs });
+  }
+
+  function saveSets(id, sets) {
+    onUpdatePatch({ exerciseLogs: { ...exerciseLogs, [id]: sets } });
+  }
+
+  const gymEntries = gymExerciseIds
+    .map((id) => exercises.find((e) => e.id === id))
+    .filter(Boolean)
+    .map((ex) => ({ entryId: ex.id, exerciseName: ex.name }));
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
+        <div className="flex items-center gap-3 mb-2">
+          <button onClick={onExit} className="flex items-center gap-1 text-xs font-semibold text-white/70">
+            <ChevronDown size={14} /> Minimize
+          </button>
+          <button onClick={() => setConfirmDeleting(true)} className="ml-auto flex items-center gap-1 text-xs font-semibold text-white/70">
+            <Trash2 size={13} /> Delete
+          </button>
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wide text-white/50">Recording</div>
+            <div className="text-lg font-black text-white">{session.title || "Workout"}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-2xl font-black tabular-nums" style={{ color: isPaused ? "#E2984B" : "#0E8388" }}>{formatElapsed(elapsed)}</div>
+            {isPaused && <div className="text-[10px] font-bold uppercase tracking-wide" style={{ color: "#E2984B" }}>Paused</div>}
+          </div>
+        </div>
+        <div className="flex items-center gap-3 mt-2 text-[11px] text-white/70">
+          <span>{gymExerciseIds.length} exercise{gymExerciseIds.length !== 1 ? "s" : ""} added</span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+        {gymExerciseIds.map((id) => {
+          const ex = exercises.find((e) => e.id === id);
+          if (!ex) return null;
+          return (
+            <div key={id} className="bg-white rounded-lg border overflow-hidden" style={{ borderColor: "#DAD7CC" }}>
+              <div className="px-2.5 pt-2.5 flex items-center justify-end">
+                <IconButton icon={X} size={13} label="Remove exercise" onClick={() => removeExercise(id)} color="#C1483B" pad={9} />
+              </div>
+              <div className="px-2.5 pb-2.5 -mt-1.5">
+                <GymSetLogger exerciseName={ex.name} sets={exerciseLogs[id] || []} onChange={(sets) => saveSets(id, sets)} />
+              </div>
+            </div>
+          );
+        })}
+        {gymExerciseIds.length === 0 && <div className="text-center text-sm text-gray-400 py-8">No exercises added yet.</div>}
+
+        <button onClick={() => setPicker(true)} className="w-full py-2.5 rounded-lg text-sm font-bold border flex items-center justify-center gap-1.5" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
+          <Plus size={14} /> Add exercise
+        </button>
+      </div>
+
+      <div className="shrink-0 px-4 py-3 border-t bg-white flex gap-2" style={{ borderColor: "#DAD7CC" }}>
+        <button
+          onClick={() => onUpdatePatch({ recording: isPaused ? resumeRecording(recording) : pauseRecording(recording) })}
+          className="flex-1 py-3 rounded-lg text-sm font-bold border"
+          style={{ borderColor: "#DAD7CC", color: "#12213A" }}
+        >
+          {isPaused ? "Resume" : "Pause"}
+        </button>
+        <button onClick={() => setFinishing(true)} className="flex-1 py-3 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          Finish
+        </button>
+      </div>
+
+      {picker && (
+        <ExercisePickerModal
+          exercises={exercises.filter((e) => e.type === "Gym")}
+          onClose={() => setPicker(false)}
+          onPick={addExercise}
+        />
+      )}
+
+      {confirmDeleting && (
+        <Modal onClose={() => setConfirmDeleting(false)}>
+          <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Delete this workout?</h3>
+          <p className="text-sm text-gray-600 mb-4">This workout was created for this recording, so deleting it removes it completely. This can't be undone.</p>
+          <div className="flex gap-2">
+            <button onClick={() => setConfirmDeleting(false)} className="flex-1 py-2.5 rounded-lg text-sm font-bold border" style={{ borderColor: "#DAD7CC" }}>Keep it</button>
+            <button onClick={onDelete} className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white" style={{ background: "#C1483B" }}>Delete</button>
+          </div>
+        </Modal>
+      )}
+
+      {finishing && (
+        <LogSessionModal
+          gymEntries={gymEntries}
+          initialTitle={session.title || ""}
+          onClose={() => setFinishing(false)}
+          onSave={({ rpe, note, gymLogs, title }) => {
+            const durationMinutes = recordingElapsedMinutes(recording);
+            const nextExerciseLogs = { ...exerciseLogs };
+            if (gymLogs) Object.entries(gymLogs).forEach(([exerciseId, sets]) => { nextExerciseLogs[exerciseId] = sets; });
+            onFinish({ rpe, note, durationMinutes, title, exerciseLogs: nextExerciseLogs });
           }}
         />
       )}
@@ -5434,23 +5700,47 @@ async function extractScheduleFromFile(file) {
 /* no backend change was needed here at all.                          */
 /* ---------------------------------------------------------------- */
 
-const SHOT_DETECTION_PROMPT = `You are looking at one or more sequential frames from a handball match video, captured around a moment a cheap motion-detection pass flagged as possibly containing a shot at goal. You are using general visual understanding, not a specialised ball-tracking model -- if you genuinely can't tell, say so via low confidence and null fields rather than guessing.
+// Beach shot types the model is asked to actively classify — "6m Penalty" is
+// excluded (obvious from the fixed setup, not something worth a vision call
+// to spot), but "Regular" is included alongside the three 2-point techniques
+// so an ordinary 1-point shot is a real, confident answer in its own right,
+// not just whatever's left over when nothing else was recognized. That
+// matters because manual logging requires picking one of these for every
+// beach shot (there's no "log without a type" skip for beach, unlike
+// indoor) — a detected shot should be able to arrive pre-filled just as
+// confidently as a keeper tapping the chip themselves.
+const BEACH_DETECTABLE_SHOT_TYPES = ["Regular", "Spin / 360", "Alley-oop", "Specialist / GK goal"];
+
+function shotDetectionPrompt(season) {
+  const isBeach = season === "Summer";
+  const shotTypeField = isBeach
+    ? `, "shotType": "Regular" | "Spin / 360" | "Alley-oop" | "Specialist / GK goal" | null, "shotTypeConfidence": "high" | "medium" | "low"`
+    : "";
+  const shotTypeGuidance = isBeach
+    ? `\n- "shotType" is which beach handball shot type this was: "Spin / 360" (the shooter spins/rotates through the release), "Alley-oop" (a teammate lobs the ball in the air for a catch-and-score, no build-up shot from a standing position), "Specialist / GK goal" (the defending team has swapped their goalkeeper out for an extra outfield attacker — no goalkeeper defending at all), or "Regular" for an ordinary standing shot with none of those techniques -- "Regular" is a genuine, confident answer in its own right, not a fallback for "unsure." Use null only when the shot type genuinely isn't visible (footage too wide, obstructed, etc.), not as a default.
+- "shotTypeConfidence" is how sure you are about "shotType" specifically, independent of "confidence" above — this is a genuinely harder call than save/goal or zone, so use "low" freely; don't let a confident save/goal read imply a confident technique read.`
+    : "";
+
+  return `You are looking at one or more sequential frames from a handball match video, captured around a moment a cheap motion-detection pass flagged as possibly containing a shot at goal. You are using general visual understanding, not a specialised ball-tracking model -- if you genuinely can't tell, say so via low confidence and null fields rather than guessing.
 
 Respond with ONLY a single JSON object, no other text before or after it, in exactly this shape:
 
-{"isShot": boolean, "outcome": "Save" | "Goal" | null, "zone": "TL" | "TM" | "TR" | "ML" | "MM" | "MR" | "BL" | "BM" | "BR" | null, "confidence": "high" | "medium" | "low", "reason": string}
+{"isShot": boolean, "outcome": "Save" | "Goal" | null, "zone": "TL" | "TM" | "TR" | "ML" | "MM" | "MR" | "BL" | "BM" | "BR" | null, "confidence": "high" | "medium" | "low"${shotTypeField}, "reason": string}
 
 - "isShot" is true only if this genuinely looks like a shot at the goal being taken and resolved (saved or scored) -- not a pass, a fast break, a throw-in, a warm-up, a celebration, or a crowd/bench/sideline shot. If the frames don't clearly show the goal and goalkeeper, isShot is false.
 - "outcome": "Save" if the goalkeeper stops it, "Goal" if it goes in. Null if isShot is false or the outcome genuinely isn't visible.
 - "zone" is a 3x3 grid of the goal FROM THE GOALKEEPER'S OWN PERSPECTIVE, facing the shooter: first letter is row (T=top, M=middle, B=bottom), second is column (L=left, M=middle, R=right) -- e.g. "TL" is top-left as the goalkeeper sees it, which is the shooter's top-right. Null if not visible or not applicable.
-- "confidence" reflects how sure you actually are, not how complete the JSON looks -- use "low" freely when the footage is blurry, too wide, or ambiguous.
+- "confidence" reflects how sure you actually are, not how complete the JSON looks -- use "low" freely when the footage is blurry, too wide, or ambiguous.${shotTypeGuidance}
 - "reason" is one short sentence explaining the call, useful for a human reviewing your suggestion afterward.`;
+}
 
 // One call per candidate moment, 1-3 frames (the flagged peak plus a little
 // temporal context) so Claude can see the shot resolve rather than judging
 // a single static frame. Returns the parsed detection plus the raw
 // `usage` block so the caller can accumulate real cost, not an estimate.
-async function detectShotAtMoment(frameDataUrls) {
+// `season` is only used to decide whether to ask for beach shot-type
+// classification at all -- an indoor video never gets that field asked of it.
+async function detectShotAtMoment(frameDataUrls, season) {
   const { data: { session } } = await supabase.auth.getSession();
   const imageBlocks = frameDataUrls.map((dataUrl) => ({
     type: "image",
@@ -5463,7 +5753,7 @@ async function detectShotAtMoment(frameDataUrls) {
       Authorization: `Bearer ${session?.access_token}`,
     },
     body: JSON.stringify({
-      system: SHOT_DETECTION_PROMPT,
+      system: shotDetectionPrompt(season),
       messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Is this a shot at goal? Answer per the instructions." }] }],
       maxTokens: 300,
     }),
@@ -5480,11 +5770,13 @@ async function detectShotAtMoment(frameDataUrls) {
       outcome: parsed.outcome === "Save" || parsed.outcome === "Goal" ? parsed.outcome : null,
       zone: ZONE_LABELS[parsed.zone] ? parsed.zone : null,
       confidence: ["high", "medium", "low"].includes(parsed.confidence) ? parsed.confidence : "low",
+      shotType: season === "Summer" && BEACH_DETECTABLE_SHOT_TYPES.includes(parsed.shotType) ? parsed.shotType : null,
+      shotTypeConfidence: ["high", "medium", "low"].includes(parsed.shotTypeConfidence) ? parsed.shotTypeConfidence : "low",
       reason: parsed.reason || null,
       usage,
     };
   } catch (e) {
-    return { isShot: false, outcome: null, zone: null, confidence: "low", reason: "Couldn't parse Kip's response.", usage };
+    return { isShot: false, outcome: null, zone: null, confidence: "low", shotType: null, shotTypeConfidence: "low", reason: "Couldn't parse Kip's response.", usage };
   }
 }
 
@@ -6662,7 +6954,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId }, ref) {
 // same "no file yet" prominent card, same detection entry point. uploadId is
 // whatever id owns the storage path (a match or a training session's own
 // id); the underlying bucket/RLS doesn't care which kind of thing it is.
-function VideoPanel({ videoUrl, videoFile, uploadId, onSaveVideoUrl, onSaveVideoFile, onRemoveVideoFile, onOpenDetection }) {
+function VideoPanel({ videoUrl, videoFile, uploadId, onSaveVideoUrl, onSaveVideoFile, onRemoveVideoFile, onOpenDetection, uploadLabel = "Upload footage" }) {
   const [editingLink, setEditingLink] = useState(false);
   const [local, setLocal] = useState(videoUrl || "");
   const [uploading, setUploading] = useState(false);
@@ -6710,7 +7002,7 @@ function VideoPanel({ videoUrl, videoFile, uploadId, onSaveVideoUrl, onSaveVideo
             </div>
           </div>
           <label className="flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-bold text-white cursor-pointer" style={{ background: "#0E8388" }}>
-            <Upload size={15} /> {uploading ? "Uploading…" : "Upload video"}
+            <Upload size={15} /> {uploading ? "Uploading…" : uploadLabel}
             <input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp" className="hidden" onChange={handleFileSelect} disabled={uploading} />
           </label>
           {uploadError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{uploadError}</div>}
@@ -6784,12 +7076,12 @@ function VideoPanel({ videoUrl, videoFile, uploadId, onSaveVideoUrl, onSaveVideo
 const SONNET_5_INPUT_PER_MTOK = 2.0;
 const SONNET_5_OUTPUT_PER_MTOK = 10.0;
 
-function VideoShotDetectionFlow({ videoFile, onClose, onConfirmShots }) {
+function VideoShotDetectionFlow({ videoFile, season, onClose, onConfirmShots }) {
   const [stage, setStage] = useState("scanning"); // scanning | analyzing | review | failed
   const [scanProgress, setScanProgress] = useState(0);
   const [analyzeProgress, setAnalyzeProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState(null);
-  const [results, setResults] = useState([]); // { id, t, thumbnail, outcome, zone, confidence, reason, included }
+  const [results, setResults] = useState([]); // { id, t, thumbnail, outcome, zone, confidence, shotType, shotTypeConfidence, reason, included }
   const [usageTotals, setUsageTotals] = useState({ inputTokens: 0, outputTokens: 0, calls: 0 });
   const [scanStats, setScanStats] = useState(null);
   const cancelledRef = useRef(false);
@@ -6843,7 +7135,7 @@ function VideoShotDetectionFlow({ videoFile, onClose, onConfirmShots }) {
         try {
           const preFrame = await grabFrameJpeg(video, canvas, ctx, Math.max(0, t - 0.4));
           const peakFrame = await grabFrameJpeg(video, canvas, ctx, t);
-          const detection = await detectShotAtMoment([preFrame, peakFrame]);
+          const detection = await detectShotAtMoment([preFrame, peakFrame], season);
           totals.calls += 1;
           totals.inputTokens += detection.usage.input_tokens || 0;
           totals.outputTokens += detection.usage.output_tokens || 0;
@@ -6855,6 +7147,15 @@ function VideoShotDetectionFlow({ videoFile, onClose, onConfirmShots }) {
               outcome: detection.outcome || "Save",
               zone: detection.zone || "MM",
               confidence: detection.confidence,
+              // Beach shot-type is a suggestion only, never auto-included --
+              // it's a harder visual call than save/goal (per the brief),
+              // so it starts unset rather than pre-picking a guess the
+              // keeper has to notice and correct. shotTypeConfidence is kept
+              // alongside so the review UI can still show how sure Kip was
+              // when it does have a guess, without it affecting the overall
+              // "included" default the way outcome confidence does.
+              shotType: detection.shotTypeConfidence !== "low" ? detection.shotType : null,
+              shotTypeConfidence: detection.shotTypeConfidence,
               reason: detection.reason,
               included: detection.confidence !== "low",
             });
@@ -6891,7 +7192,7 @@ function VideoShotDetectionFlow({ videoFile, onClose, onConfirmShots }) {
         id: uid(),
         zone: r.zone,
         outcome: r.outcome,
-        shotType: null,
+        shotType: r.shotType || null,
         videoTimestamp: formatElapsed(r.t * 1000),
         shooterNumber: null,
         position: null,
@@ -6996,6 +7297,30 @@ function VideoShotDetectionFlow({ videoFile, onClose, onConfirmShots }) {
                           </button>
                         ))}
                       </div>
+                      {season === "Summer" && (
+                        <div className="mb-1.5">
+                          <div className="flex items-center gap-1 mb-1">
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Shot type</span>
+                            {r.shotType && (
+                              <span className="text-[9px] font-semibold" style={{ color: "#68655B" }}>
+                                (Kip's guess, {r.shotTypeConfidence} confidence — check it)
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {BEACH_DETECTABLE_SHOT_TYPES.map((type) => (
+                              <button
+                                key={type}
+                                onClick={() => updateResult(r.id, { shotType: type })}
+                                className="px-1.5 py-1 rounded text-[10px] font-bold border"
+                                style={r.shotType === type ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC", color: "#12213A" }}
+                              >
+                                {type}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       {r.reason && <p className="text-[10px] text-gray-400 italic">"{r.reason}"</p>}
                       <label className="flex items-center gap-1.5 mt-1.5 text-[11px] font-semibold" style={{ color: "#68655B" }}>
                         <input type="checkbox" checked={r.included} onChange={(e) => updateResult(r.id, { included: e.target.checked })} />
@@ -7074,6 +7399,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
         videoUrl={match.videoUrl}
         videoFile={match.videoFile}
         uploadId={match.id}
+        uploadLabel="Upload game footage"
         onSaveVideoUrl={(videoUrl) => onSave({ ...match, videoUrl })}
         onSaveVideoFile={(videoFile) => onSave({ ...match, videoFile })}
         onRemoveVideoFile={async () => {
@@ -7086,6 +7412,7 @@ function MatchDetail({ match, matches, onBack, onSave, onDelete, opponents = [],
       {showDetection && match.videoFile && (
         <VideoShotDetectionFlow
           videoFile={match.videoFile}
+          season={match.season}
           onClose={() => setShowDetection(false)}
           onConfirmShots={(newShots) => {
             onSave({ ...match, shots: [...(match.shots || []), ...newShots] });
@@ -7610,7 +7937,7 @@ function TrainingReviewStep({ kind, session, exercises, onUpdateSession, onConti
       <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
         <div>
           <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Session finished — review</div>
-          <div className="text-lg font-black text-white">{session.title || "Training session"}</div>
+          <div className="text-lg font-black text-white">{session.title || (kind === "workout" ? "Workout" : "Training session")}</div>
         </div>
         <button onClick={onClose} className="text-[11px] font-semibold text-white/60 shrink-0">Skip</button>
       </div>
@@ -7878,6 +8205,7 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
     return (
       <VideoShotDetectionFlow
         videoFile={match.videoFile}
+        season={match.season}
         onClose={() => setShowDetection(false)}
         onConfirmShots={(newShots) => {
           onSaveMatch({ ...match, shots: [...(match.shots || []), ...newShots] });
@@ -7912,7 +8240,7 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
             <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Upload it for AI shot detection</div>
             <p className="text-xs text-gray-500 mb-4 max-w-xs">Kip scans the video for shot moments and suggests zone, outcome and type for you to review — a lot faster than logging every one by hand.</p>
             <label className="flex items-center justify-center gap-1.5 px-5 py-3 rounded-lg text-sm font-bold text-white cursor-pointer" style={{ background: "#0E8388" }}>
-              <Upload size={15} /> {uploading ? "Uploading…" : "Upload match video"}
+              <Upload size={15} /> {uploading ? "Uploading…" : "Upload game footage"}
               <input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp" className="hidden" onChange={handleFileSelect} disabled={uploading} />
             </label>
             {uploadError && <div className="text-[11px] font-semibold mt-2" style={{ color: "#C1483B" }}>{uploadError}</div>}
@@ -8072,6 +8400,7 @@ function TrainingSessionDetail({ session, kind, season, exercises, onSaveSession
         videoUrl={session.videoUrl}
         videoFile={session.videoFile}
         uploadId={kind === "plan" ? session.sessionId : session.id}
+        uploadLabel="Upload session footage"
         onSaveVideoUrl={(videoUrl) => onSaveSession({ ...session, videoUrl })}
         onSaveVideoFile={(videoFile) => onSaveSession({ ...session, videoFile })}
         onRemoveVideoFile={async () => {
@@ -8084,6 +8413,7 @@ function TrainingSessionDetail({ session, kind, season, exercises, onSaveSession
       {showDetection && session.videoFile && (
         <VideoShotDetectionFlow
           videoFile={session.videoFile}
+          season={season}
           onClose={() => setShowDetection(false)}
           onConfirmShots={(newShots) => {
             onSaveSession({ ...session, shots: [...(session.shots || []), ...newShots] });
