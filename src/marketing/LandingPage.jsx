@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import {
-  BookOpen, CalendarRange, BarChart3, Sparkles, Snowflake, Waves, ArrowRight,
+  BookOpen, CalendarRange, BarChart3, Sparkles, Snowflake, Waves, ArrowRight, Video,
 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider.jsx";
 import { INK, PAPER, TEAL, WINTER, SUMMER, LINE } from "./theme.js";
@@ -133,6 +133,16 @@ export default function LandingPage() {
             Kip knows your level, discipline, availability, current block, and recent match stats, so its
             advice is actually about your training.
           </FeatureCard>
+          <div className="bg-white rounded-xl border p-5 sm:col-span-2" style={{ borderColor: LINE }}>
+            <div className="w-10 h-10 rounded-lg flex items-center justify-center mb-3" style={{ background: PAPER }}>
+              <Video size={19} color={TEAL} strokeWidth={2.2} />
+            </div>
+            <h3 className="text-base font-black mb-1.5" style={{ color: INK }}>Upload match footage, get shots logged for you</h3>
+            <p className="text-sm text-gray-600 leading-relaxed">
+              Upload video from a match and Keepr's AI scans it for shot moments, suggesting zone, outcome
+              and type for you to review — no more re-watching a full match just to log it after the fact.
+            </p>
+          </div>
         </div>
       </section>
 

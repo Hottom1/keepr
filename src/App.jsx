@@ -702,6 +702,7 @@ export default function GKTrainerApp() {
             season={season}
             profile={profile}
             onSave={savePlan}
+            onSaveProfile={saveProfile}
             onDelete={deletePlan}
             onSetSessionDate={setPlanSessionDate}
             matches={matches}
@@ -2136,7 +2137,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
+function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2203,6 +2204,18 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
   const upcomingMatch = [...matches]
     .filter((m) => m.date >= todayDateKey && m.date <= soonCutoff && !m.recording)
     .sort((a, b) => new Date(a.date) - new Date(b.date))[0] || null;
+
+  // A light, dismissible nudge toward AI shot detection — surfaced here
+  // rather than repeated every time the match is opened. Looks back the same
+  // 14 days "Soon" above looks forward, at the most recent finished match
+  // with no uploadable footage yet (a watch-only YouTube link doesn't count,
+  // same reasoning as the match-detail card). Dismissing one match's nudge
+  // doesn't suppress the next one — the dismissal list is per match id.
+  const recentCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const dismissedFootageNudges = profile.dismissedFootageNudges || [];
+  const footageNudgeMatch = [...matches]
+    .filter((m) => m.date < todayDateKey && m.date >= recentCutoff && !m.recording && !m.videoFile && !dismissedFootageNudges.includes(m.id))
+    .sort((a, b) => new Date(b.date) - new Date(a.date))[0] || null;
 
   return (
     <div className="px-4 pt-4 pb-6 space-y-3">
@@ -2354,6 +2367,23 @@ function Plans({ plans, exercises, season, profile, onSave, onDelete, onSetSessi
             <div className="text-[11px] text-gray-500">{formatShortDate(upcomingMatch.date)}{upcomingMatch.competition ? ` · ${upcomingMatch.competition}` : ""}</div>
           </div>
           <SeasonBadge season={upcomingMatch.season} />
+        </div>
+      )}
+
+      {footageNudgeMatch && (
+        <div className="rounded-lg border p-3 flex items-start gap-2.5" style={{ borderColor: "#DAD7CC", background: "#fff" }}>
+          <Sparkles size={15} color="#0E8388" className="shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-bold" style={{ color: "#12213A" }}>Got footage from vs {footageNudgeMatch.opponent}?</div>
+            <div className="text-[11px] text-gray-500 mt-0.5">Upload it in Match stats and Kip can suggest shots to review.</div>
+          </div>
+          <button
+            onClick={() => onSaveProfile({ ...profile, dismissedFootageNudges: [...dismissedFootageNudges, footageNudgeMatch.id] })}
+            aria-label="Dismiss"
+            className="shrink-0 text-gray-400"
+          >
+            <X size={14} />
+          </button>
         </div>
       )}
 
@@ -6469,11 +6499,12 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({ videoId }, ref) {
 // detection can ever use). A keeper can have either, both, or neither --
 // the link section never gates the upload section or vice versa.
 function MatchVideoPanel({ match, onSaveVideoUrl, onSaveVideoFile, onRemoveVideoFile, onOpenDetection }) {
-  const [editing, setEditing] = useState(!match.videoUrl);
+  const [editingLink, setEditingLink] = useState(false);
   const [local, setLocal] = useState(match.videoUrl || "");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
   const youtubeId = extractYouTubeId(match.videoUrl);
+  const hasFile = !!match.videoFile;
 
   async function handleFileSelect(e) {
     const file = e.target.files?.[0];
@@ -6493,7 +6524,53 @@ function MatchVideoPanel({ match, onSaveVideoUrl, onSaveVideoFile, onRemoveVideo
 
   return (
     <div className="mt-2">
-      {editing ? (
+      {/* The main visibility fix: this used to be a small secondary
+          sub-section below the video-link editor, easy to miss entirely if
+          you didn't already know the feature existed. It's now the lead
+          element whenever there's no uploadable file yet — including when a
+          YouTube/Drive link already exists, since that link can't power
+          detection either (see the copy below), so a keeper who's already
+          added one is just as much the audience for this as someone with
+          nothing at all. */}
+      {!hasFile && (
+        <div className="rounded-lg border-2 p-3.5 mb-3" style={{ borderColor: "#0E8388", background: "#fff" }}>
+          <div className="flex items-start gap-2.5 mb-2.5">
+            <Sparkles size={18} color="#0E8388" className="shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-black" style={{ color: "#12213A" }}>Upload footage to auto-detect shots</div>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {youtubeId
+                  ? "That YouTube link is watch-only — YouTube doesn't expose frame data to embedded players, by design. Upload the actual video file and Kip will scan it for shot moments to review."
+                  : "Kip scans the video for shot moments and suggests zone, outcome and type for you to review — a lot faster than logging every one by hand."}
+              </p>
+            </div>
+          </div>
+          <label className="flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-bold text-white cursor-pointer" style={{ background: "#0E8388" }}>
+            <Upload size={15} /> {uploading ? "Uploading…" : "Upload match video"}
+            <input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+          </label>
+          {uploadError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{uploadError}</div>}
+        </div>
+      )}
+
+      {hasFile && (
+        <div className="bg-white rounded-lg border p-2.5 mb-3" style={{ borderColor: "#DAD7CC" }}>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div className="text-xs font-semibold truncate flex items-center gap-1.5" style={{ color: "#12213A" }}>
+              <Paperclip size={12} className="shrink-0" /> {match.videoFile.name}
+            </div>
+            <IconButton icon={X} size={13} label="Remove uploaded video" onClick={onRemoveVideoFile} color="#C1483B" pad={9} />
+          </div>
+          <button onClick={onOpenDetection} className="w-full py-2 rounded-lg text-xs font-bold text-white" style={{ background: "#0E8388" }}>
+            Detect shots from video
+          </button>
+        </div>
+      )}
+
+      {/* Reference video link — independent of detection, so it keeps its
+          own small, secondary affordance rather than competing with the
+          card above. */}
+      {editingLink ? (
         <div className="flex items-center gap-2">
           <input
             className="input flex-1"
@@ -6502,57 +6579,33 @@ function MatchVideoPanel({ match, onSaveVideoUrl, onSaveVideoFile, onRemoveVideo
             onChange={(e) => setLocal(e.target.value)}
           />
           <button
-            onClick={() => { onSaveVideoUrl(local.trim()); setEditing(false); }}
+            onClick={() => { onSaveVideoUrl(local.trim()); setEditingLink(false); }}
             className="text-xs font-bold px-2.5 py-1.5 rounded-lg text-white shrink-0"
             style={{ background: "#0E8388" }}
           >
             Save
           </button>
         </div>
-      ) : (
+      ) : match.videoUrl ? (
         <>
           {youtubeId ? (
-            <div className="mb-2">
+            <div className="mb-1">
               <YouTubePlayer videoId={youtubeId} />
             </div>
           ) : (
-            <div className="flex items-center gap-3 mb-2">
+            <div className="flex items-center gap-3 mb-1">
               <a href={match.videoUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-bold flex items-center gap-1" style={{ color: "#0E8388" }}>
                 <Video size={13} /> Watch video
               </a>
             </div>
           )}
-          <button onClick={() => { setLocal(match.videoUrl); setEditing(true); }} className="text-[11px] text-gray-400 font-semibold">Edit link</button>
+          <button onClick={() => { setLocal(match.videoUrl); setEditingLink(true); }} className="text-[11px] text-gray-400 font-semibold">Edit link</button>
         </>
+      ) : (
+        <button onClick={() => setEditingLink(true)} className="text-[11px] text-gray-400 font-semibold flex items-center gap-1">
+          <Link2 size={11} /> Have a link to the footage instead? Add it
+        </button>
       )}
-
-      <div className="mt-3 pt-3 border-t" style={{ borderColor: "#DAD7CC" }}>
-        <div className="text-[10px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">AI-assisted shot detection</div>
-        {match.videoFile ? (
-          <div className="bg-white rounded-lg border p-2.5" style={{ borderColor: "#DAD7CC" }}>
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="text-xs font-semibold truncate flex items-center gap-1.5" style={{ color: "#12213A" }}>
-                <Paperclip size={12} className="shrink-0" /> {match.videoFile.name}
-              </div>
-              <IconButton icon={X} size={13} label="Remove uploaded video" onClick={onRemoveVideoFile} color="#C1483B" pad={9} />
-            </div>
-            <button onClick={onOpenDetection} className="w-full py-2 rounded-lg text-xs font-bold text-white" style={{ background: "#0E8388" }}>
-              Detect shots from video
-            </button>
-          </div>
-        ) : (
-          <div>
-            <p className="text-[11px] text-gray-500 mb-2">
-              A YouTube link is watch-only — YouTube doesn't expose frame data to embedded players, by design. Upload the actual video file to let Kip suggest shots for you to review.
-            </p>
-            <label className="flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-bold border cursor-pointer" style={{ borderColor: "#0E8388", color: "#0E8388" }}>
-              <Upload size={13} /> {uploading ? "Uploading…" : "Upload match video"}
-              <input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp" className="hidden" onChange={handleFileSelect} disabled={uploading} />
-            </label>
-            {uploadError && <div className="text-[11px] font-semibold mt-1.5" style={{ color: "#C1483B" }}>{uploadError}</div>}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -7567,17 +7620,90 @@ function ReportPromptStep({ profile, onSaveProfile, plans, season, matches, exer
 // a connected teammate only) -> report prompt -> done. Every step but the
 // last is a quick glance-and-continue over already-saved data; only the
 // report step is explicitly skippable-with-no-action, per the brief.
+// Chained into PostRecordingFlow, not a separate prompt mechanism — same
+// full-screen step pattern as MatchReviewStep/TrainingReviewStep, including
+// the same "Skip" escape hatch. Its job is just to get footage attached to
+// the match; actually running detection stays on the match-detail screen
+// (the "Detect shots from video" card MatchVideoPanel already shows once a
+// file exists), so this step doesn't duplicate that whole scanning/review
+// pipeline inline.
+function FootagePromptStep({ match, onSaveMatch, onContinue }) {
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [uploaded, setUploaded] = useState(false);
+
+  async function handleFileSelect(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const meta = await uploadMatchVideo(match.id, file);
+      onSaveMatch({ ...match, videoFile: meta });
+      setUploaded(true);
+    } catch (err) {
+      setUploadError(err.message || "Upload failed — try again.");
+    } finally {
+      setUploading(false);
+      e.target.value = "";
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+      <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">One more thing</div>
+          <div className="text-lg font-black text-white">Have footage of this match?</div>
+        </div>
+        <button onClick={onContinue} className="text-[11px] font-semibold text-white/60 shrink-0">Skip</button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-5 py-6 flex flex-col items-center justify-center text-center">
+        <Sparkles size={28} color="#0E8388" className="mb-3" />
+        {uploaded ? (
+          <>
+            <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Footage attached</div>
+            <p className="text-xs text-gray-500 max-w-xs">You can run AI shot detection any time from this match's page in Match stats.</p>
+          </>
+        ) : (
+          <>
+            <div className="text-sm font-bold mb-1" style={{ color: "#12213A" }}>Upload it for AI shot detection</div>
+            <p className="text-xs text-gray-500 mb-4 max-w-xs">Kip scans the video for shot moments and suggests zone, outcome and type for you to review — a lot faster than logging every one by hand.</p>
+            <label className="flex items-center justify-center gap-1.5 px-5 py-3 rounded-lg text-sm font-bold text-white cursor-pointer" style={{ background: "#0E8388" }}>
+              <Upload size={15} /> {uploading ? "Uploading…" : "Upload match video"}
+              <input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/3gpp" className="hidden" onChange={handleFileSelect} disabled={uploading} />
+            </label>
+            {uploadError && <div className="text-[11px] font-semibold mt-2" style={{ color: "#C1483B" }}>{uploadError}</div>}
+          </>
+        )}
+      </div>
+      <div className="shrink-0 px-4 py-3 border-t bg-white" style={{ borderColor: "#DAD7CC" }}>
+        <button onClick={onContinue} className="w-full py-3.5 rounded-lg text-sm font-bold text-white" style={{ background: "#0E8388" }}>
+          {uploaded ? "Continue" : "Not now — continue"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatch, exercises, profile, onSaveProfile, plans, season, matches, adHocSessions, onUpdateSession, onSaveMatch, onReportGenerated, onClose }) {
   const [step, setStep] = useState("review");
   const [liveTeammateMatch, setLiveTeammateMatch] = useState(teammateMatch);
   const hasTeammateStep = kind === "match" && !!teammateOwnerId && !!liveTeammateMatch;
+  // Right after a live recording is the moment footage is most likely to
+  // already exist and be top of mind, so this chains into the same flow
+  // rather than waiting for the keeper to stumble onto the match-detail
+  // card later. Same "no file yet" gate as that card, for the same reason
+  // (a watch-only YouTube link doesn't help detection either).
+  const needsFootageStep = kind === "match" && !match.videoFile;
+  const afterTeammateOrFootage = () => setStep(needsFootageStep ? "footage" : "report");
 
   if (step === "review") {
     return kind === "match" ? (
       <MatchReviewStep
         match={match}
         onSaveMatch={onSaveMatch}
-        onContinue={() => setStep(hasTeammateStep ? "teammate" : "report")}
+        onContinue={() => setStep(hasTeammateStep ? "teammate" : needsFootageStep ? "footage" : "report")}
         onClose={onClose}
       />
     ) : (
@@ -7597,6 +7723,16 @@ function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatc
         teammateMatch={liveTeammateMatch}
         teammateOwnerId={teammateOwnerId}
         onUpdateTeammateMatch={setLiveTeammateMatch}
+        onContinue={afterTeammateOrFootage}
+      />
+    );
+  }
+
+  if (step === "footage" && needsFootageStep) {
+    return (
+      <FootagePromptStep
+        match={match}
+        onSaveMatch={onSaveMatch}
         onContinue={() => setStep("report")}
       />
     );

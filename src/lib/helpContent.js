@@ -176,7 +176,9 @@ Anything logged into a teammate's account shows up there tagged "Recorded by [yo
     keywords: ["assistant", "chat", "ai", "coach"],
     body: `Kip is Keepr's built-in coach — a chat you can ask anything, but it also takes real actions: it can pull your actual logged numbers when you ask something specific (a zone or shot-type breakdown, training summary, gym progress, how you've done against a particular opponent) rather than guessing, it can build a full training block right in the conversation, and it generates the same progress reports Stats does.
 
-It's grounded in what you've actually logged — if you haven't logged much yet, it'll say so rather than making something up.`,
+It's grounded in what you've actually logged — if you haven't logged much yet, it'll say so rather than making something up.
+
+One more thing worth knowing early: if you've got match footage, upload it from that match's page in Match stats and Kip will scan it for shot moments, suggesting zone, outcome and type for you to review — a lot faster than logging every shot by hand.`,
   },
   {
     id: "kip-profile",
