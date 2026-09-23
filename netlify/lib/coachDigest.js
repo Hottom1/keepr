@@ -8,6 +8,7 @@ import { sendOutboundEmail } from "./sendEmail.js";
 import { callKipDirect } from "./callKipDirect.js";
 import { appendReport, setLastCoachDigestSentAt, reserveCoachDigestSend, getUserEmailById, getCoachConsentStatus } from "./supabaseAdmin.js";
 import { signCoachUnsubscribeToken } from "./unsubscribeToken.js";
+import { renderCoachDigestEmailHtml } from "./coachDigestEmail.js";
 import { computeCoachReportData, buildKipSystemPrompt, DEFAULT_EXERCISES, uid, parseSingleEmail } from "../../src/lib/kipDomain.js";
 
 const SITE_URL = "https://keepr.coach";
@@ -94,7 +95,13 @@ export async function sendCoachDigestForUser(userId, data, { mode = "scheduled" 
   const keeperEmail = await getUserEmailById(userId).catch(() => null);
   const unsubUrl = `${SITE_URL}/.netlify/functions/coach-unsubscribe?e=${encodeURIComponent(coachEmail.toLowerCase())}&t=${signCoachUnsubscribeToken(coachEmail)}`;
   const footer = `\n\n—\nThis update was sent from the Keepr account ${keeperEmail || "of a keeper"}, who listed you as their coach. Not expecting it, or don't want these? Stop all Keepr emails to this address: ${unsubUrl}`;
-  await sendOutboundEmail({ to: coachEmail, subject: "Keepr training update", text: narrative + footer });
+  // A real HTML layout is the primary experience now (see "Targeted
+  // desktop/tablet support," part 1 -- a coach is often opening this on a
+  // laptop, forming a first impression of the whole product) but the plain
+  // text version stays as the fallback every email client keeps around for
+  // accessibility, spam scoring, and clients that don't render HTML at all.
+  const html = renderCoachDigestEmailHtml({ reportData, narrative, keeperEmail, unsubUrl });
+  await sendOutboundEmail({ to: coachEmail, subject: "Keepr training update", text: narrative + footer, html });
 
   const report = {
     id: uid(),

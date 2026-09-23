@@ -797,6 +797,8 @@ export default function GKTrainerApp() {
             onSaveOpponentRoster={saveOpponentRoster}
             guestTeammates={guestTeammates}
             onSaveGuestTeammate={saveGuestTeammate}
+            onConfirmGuestShots={confirmGuestDetectedShots}
+            onConfirmTeammateShots={confirmTeammateDetectedShots}
             onOpenLiveRecorder={setActiveLiveTarget}
             kipMessages={kipMessages}
             onSaveMessages={saveKipMessages}
@@ -1143,6 +1145,10 @@ export default function GKTrainerApp() {
             matches={matches}
             adHocSessions={adHocSessions}
             onSaveMatch={saveMatch}
+            guestTeammates={guestTeammates}
+            onSaveGuestTeammate={saveGuestTeammate}
+            onConfirmGuestShots={confirmGuestDetectedShots}
+            onConfirmTeammateShots={confirmTeammateDetectedShots}
             onReportGenerated={addReportAndNotify}
             onClose={() => setPostRecordingFlow(null)}
           />
@@ -1775,11 +1781,18 @@ function Field({ label, children }) {
   );
 }
 
-function Modal({ onClose, children }) {
+// `size` is opt-in and only changes the max-width cap -- every existing
+// call site keeps its default "md" (max-w-md, unchanged) so this is a
+// zero-risk addition, not a global modal-width change. "lg" exists for the
+// one screen that genuinely needs real desktop width to do its job: the
+// video scrubbing/time-range assignment step (see "Targeted desktop/tablet
+// support," part 2) needs room for a video player and a ranges list side by
+// side, which max-w-md's 448px cannot fit.
+function Modal({ onClose, children, size = "md" }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40" onClick={onClose}>
       <div
-        className="bg-[#F3F2ED] rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto p-5"
+        className={`bg-[#F3F2ED] rounded-t-2xl sm:rounded-2xl w-full ${size === "lg" ? "max-w-3xl" : "max-w-md"} max-h-[85vh] overflow-y-auto p-5`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex justify-end mb-1">
@@ -2290,7 +2303,7 @@ function CalendarView({ plans, matches, adHocSessions, exercises, onLogPlanSessi
   );
 }
 
-function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
+function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDelete, onSetSessionDate, matches, onSaveMatch, adHocSessions, onSaveAdHoc, onDeleteAdHoc, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots, onOpenLiveRecorder, kipMessages, onSaveMessages, pendingCalendarSuggestions = [], onConfirmCalendarSuggestion, onDiscardCalendarSuggestion, onOpenHelp, onOpenTrainingSetup, onOpenKip, onSessionLogged }) {
   const [view, setView] = useState("list"); // "list" | "calendar"
   const [openId, setOpenId] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -2851,6 +2864,10 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
           <FootagePromptStep
             match={footageStepMatch}
             onSaveMatch={onSaveMatch}
+            guestTeammates={guestTeammates}
+            onSaveGuestTeammate={onSaveGuestTeammate}
+            onConfirmGuestShots={onConfirmGuestShots}
+            onConfirmTeammateShots={onConfirmTeammateShots}
             onContinue={() => setFootageStepMatchId(null)}
           />
         );
@@ -2941,7 +2958,13 @@ function TrainingSetupScreen({ plans, exercises, onStart, onClose }) {
   const valid = title.trim();
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      {/* Capped and centered at desktop widths, same pattern the main app
+          tabs already use (see the max-w-md wrapper around the tab content
+          in GKTrainerApp) -- a plain background on either side reads as
+          intentional, not a phone view stretched edge to edge. Quick
+          lightweight pass only; see "Targeted desktop/tablet support," part 3. */}
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
         <button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
           <ArrowLeft size={14} /> Cancel
@@ -2994,6 +3017,7 @@ function TrainingSetupScreen({ plans, exercises, onStart, onClose }) {
         </button>
       </div>
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+      </div>
     </div>
   );
 }
@@ -3007,7 +3031,8 @@ function WorkoutSetupScreen({ onStart, onClose }) {
   const [title, setTitle] = useState("");
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
         <button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
           <ArrowLeft size={14} /> Cancel
@@ -3035,6 +3060,7 @@ function WorkoutSetupScreen({ onStart, onClose }) {
         </button>
       </div>
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+      </div>
     </div>
   );
 }
@@ -3143,7 +3169,8 @@ function MatchSetupScreen({ season, matches, opponents, guestTeammates = [], onS
   const valid = form.opponent.trim();
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
         <button onClick={onClose} className="flex items-center gap-1 text-xs font-semibold text-white/70 mb-2">
           <ArrowLeft size={14} /> Cancel
@@ -3248,6 +3275,7 @@ function MatchSetupScreen({ season, matches, opponents, guestTeammates = [], onS
         />
       )}
       <style>{`.input{width:100%;background:#fff;border:1px solid #DAD7CC;border-radius:0.5rem;padding:0.55rem 0.7rem;font-size:0.875rem;outline:none;}`}</style>
+      </div>
     </div>
   );
 }
@@ -6573,7 +6601,8 @@ function KipAssistantSheet({ profile, messages, onSaveMessages, plans, season, m
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-50 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0 flex items-center justify-between" style={{ background: "#12213A" }}>
         <div className="flex items-center gap-1.5">
           <Sparkles size={15} color="#0E8388" />
@@ -6623,6 +6652,7 @@ function KipAssistantSheet({ profile, messages, onSaveMessages, plans, season, m
             <Send size={15} />
           </button>
         </div>
+      </div>
       </div>
     </div>
   );
@@ -7354,6 +7384,52 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
   const [videoDuration, setVideoDuration] = useState(0);
   const [ranges, setRanges] = useState([{ id: "r0", start: 0, end: Infinity, identityKey: "me" }]);
   const [jerseyNumbers, setJerseyNumbers] = useState({}); // { [identityKey]: "7" }
+  // The scrubber needs the actual uploaded file playable, not match.videoUrl
+  // (that's a reference link -- often YouTube, which a plain <video> tag
+  // can't play at all) -- same signed-URL call the detection pipeline
+  // itself uses once scanning starts, just fetched up front here so the
+  // player has something to load immediately.
+  const [previewUrl, setPreviewUrl] = useState(null);
+
+  useEffect(() => {
+    if (!match?.videoFile) return;
+    let cancelled = false;
+    getSignedMatchVideoUrl(match.videoFile.path).then((url) => { if (!cancelled) setPreviewUrl(url); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [match]);
+
+  // Frame-by-frame scrubbing precision (part 2, "Targeted desktop/tablet
+  // support") -- Left/Right nudge by one frame (assuming 30fps; there's no
+  // reliable way to read a video's real frame rate from the browser, and a
+  // 1/30s step is close enough to feel precise on any real footage rate),
+  // Shift+Left/Right by a full second for coarser adjustment. Scoped to the
+  // ranges scrubber specifically being on screen, and skipped while a text
+  // input has focus so it doesn't hijack typing elsewhere on the page (e.g.
+  // the guest-name field).
+  useEffect(() => {
+    if (!(multipleKeepers && splitMethod === "ranges")) return;
+    function onKeyDown(e) {
+      if (!videoElRef.current) return;
+      const tag = document.activeElement?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        videoElRef.current.currentTime = Math.max(0, videoElRef.current.currentTime - (e.shiftKey ? 1 : 1 / 30));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        videoElRef.current.currentTime = Math.min(videoElRef.current.duration || Infinity, videoElRef.current.currentTime + (e.shiftKey ? 1 : 1 / 30));
+      } else if (e.key === " ") {
+        e.preventDefault();
+        if (videoElRef.current.paused) videoElRef.current.play(); else videoElRef.current.pause();
+      } else if (e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        addSplitHere();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multipleKeepers, splitMethod]);
 
   useEffect(() => {
     if (!match) return;
@@ -7608,7 +7684,7 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
   const includedCount = results.filter((r) => r.included).length;
 
   return (
-    <Modal onClose={onClose}>
+    <Modal onClose={onClose} size={stage === "setup" ? "lg" : "md"}>
       {stage === "setup" && (
         <div>
           <h3 className="text-base font-black mb-1" style={{ color: "#12213A" }}>Before we scan</h3>
@@ -7655,22 +7731,42 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
                   {splitMethod === "ranges" ? (
                     <div>
                       <p className="text-[11px] text-gray-500 mb-2">Play the video, pause where the keeper changes, and split — the default method, most reliable.</p>
-                      <video ref={videoElRef} src={match?.videoUrl || undefined} controls className="w-full rounded-lg mb-2 bg-black" onLoadedMetadata={(e) => { setVideoDuration(e.currentTarget.duration); setRanges((prev) => prev.map((r) => (r.end === Infinity ? { ...r, end: e.currentTarget.duration } : r))); }} />
-                      <button onClick={addSplitHere} className="w-full py-2 rounded-lg text-xs font-bold border mb-3" style={{ borderColor: "#0E8388", color: "#0E8388" }}>Split here</button>
-                      <div className="space-y-1.5">
-                        {ranges.map((r) => (
-                          <div key={r.id} className="rounded-md border p-2" style={{ borderColor: "#DAD7CC" }}>
-                            <div className="flex items-center justify-between mb-1.5">
-                              <div className="text-[11px] font-bold" style={{ color: "#12213A" }}>{formatElapsed(r.start * 1000)}–{r.end === Infinity ? "end" : formatElapsed(r.end * 1000)}</div>
-                              {ranges.length > 1 && <IconButton icon={X} size={12} label="Remove split" onClick={() => removeRange(r.id)} color="#C1483B" pad={7} />}
+                      {/* Single column on mobile (video, then splits list, stacked
+                          — the original layout, untouched); side by side from
+                          sm: up, where there's room for the video to stay large
+                          while the splits list is worked on independently,
+                          instead of both competing for one narrow column. */}
+                      <div className="flex flex-col sm:flex-row gap-4">
+                        <div className="sm:w-3/5">
+                          <video
+                            ref={videoElRef}
+                            src={previewUrl || undefined}
+                            controls
+                            className="w-full rounded-lg bg-black"
+                            style={{ aspectRatio: "16/9" }}
+                            onLoadedMetadata={(e) => { setVideoDuration(e.currentTarget.duration); setRanges((prev) => prev.map((r) => (r.end === Infinity ? { ...r, end: e.currentTarget.duration } : r))); }}
+                          />
+                          {!previewUrl && <div className="text-[11px] text-gray-400 mt-1.5">Loading video…</div>}
+                          <button onClick={addSplitHere} className="w-full py-2 rounded-lg text-xs font-bold border mt-2" style={{ borderColor: "#0E8388", color: "#0E8388" }}>Split here</button>
+                          <p className="hidden sm:block text-[10px] text-gray-400 mt-1.5">
+                            Keyboard: <span className="font-mono">←/→</span> nudge a frame, <span className="font-mono">shift+←/→</span> nudge a second, <span className="font-mono">space</span> play/pause, <span className="font-mono">S</span> split here.
+                          </p>
+                        </div>
+                        <div className="sm:w-2/5 space-y-1.5 sm:max-h-[360px] sm:overflow-y-auto">
+                          {ranges.map((r) => (
+                            <div key={r.id} className="rounded-md border p-2" style={{ borderColor: "#DAD7CC" }}>
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="text-[11px] font-bold" style={{ color: "#12213A" }}>{formatElapsed(r.start * 1000)}–{r.end === Infinity ? "end" : formatElapsed(r.end * 1000)}</div>
+                                {ranges.length > 1 && <IconButton icon={X} size={12} label="Remove split" onClick={() => removeRange(r.id)} color="#C1483B" pad={7} />}
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {allIdentities.map((idn) => (
+                                  <button key={idn.key} onClick={() => setRangeIdentity(r.id, idn.key)} className="px-2 py-1 rounded text-[10px] font-bold border" style={r.identityKey === idn.key ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>{idn.label}</button>
+                                ))}
+                              </div>
                             </div>
-                            <div className="flex flex-wrap gap-1">
-                              {allIdentities.map((idn) => (
-                                <button key={idn.key} onClick={() => setRangeIdentity(r.id, idn.key)} className="px-2 py-1 rounded text-[10px] font-bold border" style={r.identityKey === idn.key ? { background: "#12213A", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>{idn.label}</button>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
+                          ))}
+                        </div>
                       </div>
                     </div>
                   ) : (
@@ -8439,7 +8535,8 @@ function MatchReviewStep({ match, onSaveMatch, onContinue, onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
         <div>
           <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Match finished — review</div>
@@ -8487,6 +8584,7 @@ function MatchReviewStep({ match, onSaveMatch, onContinue, onClose }) {
           Looks good — continue
         </button>
       </div>
+      </div>
     </div>
   );
 }
@@ -8526,7 +8624,8 @@ function TrainingReviewStep({ kind, session, exercises, onUpdateSession, onConti
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
         <div>
           <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Session finished — review</div>
@@ -8611,6 +8710,7 @@ function TrainingReviewStep({ kind, session, exercises, onUpdateSession, onConti
           }}
         />
       )}
+      </div>
     </div>
   );
 }
@@ -8644,7 +8744,8 @@ function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMa
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
         <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">Recorded for {teammateMatch.recordedByEmail ? "them" : "your teammate"}</div>
         <div className="text-lg font-black text-white">vs {teammateMatch.opponent}</div>
@@ -8685,6 +8786,7 @@ function TeammateReviewStep({ teammateMatch, teammateOwnerId, onUpdateTeammateMa
           Looks good — continue
         </button>
       </div>
+      </div>
     </div>
   );
 }
@@ -8715,7 +8817,8 @@ function ReportPromptStep({ profile, onSaveProfile, plans, season, matches, exer
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0" style={{ background: "#12213A" }}>
         <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">All logged</div>
         <div className="text-lg font-black text-white">Nice work</div>
@@ -8754,6 +8857,7 @@ function ReportPromptStep({ profile, onSaveProfile, plans, season, matches, exer
           <CoachSharingSection profile={profile} onSaveProfile={onSaveProfile} />
         </Modal>
       )}
+      </div>
     </div>
   );
 }
@@ -8772,7 +8876,7 @@ function ReportPromptStep({ profile, onSaveProfile, plans, season, matches, exer
 // silently moving on — a keeper who came here specifically to hand over
 // footage shouldn't have to go find the match again afterward to do
 // anything with it.
-function FootagePromptStep({ match, onSaveMatch, onContinue }) {
+function FootagePromptStep({ match, onSaveMatch, onContinue, guestTeammates, onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots }) {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
   const [showDetection, setShowDetection] = useState(false);
@@ -8799,6 +8903,12 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
       <VideoShotDetectionFlow
         videoFile={match.videoFile}
         season={match.season}
+        match={match}
+        onSaveMatch={onSaveMatch}
+        guestTeammates={guestTeammates}
+        onSaveGuestTeammate={onSaveGuestTeammate}
+        onConfirmGuestShots={onConfirmGuestShots}
+        onConfirmTeammateShots={onConfirmTeammateShots}
         onClose={() => setShowDetection(false)}
         onConfirmShots={(newShots) => {
           onSaveMatch({ ...match, shots: [...(match.shots || []), ...newShots] });
@@ -8810,7 +8920,8 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col" style={{ background: "#F3F2ED" }}>
+    <div className="fixed inset-0 z-40 flex justify-center" style={{ background: "#F3F2ED" }}>
+      <div className="max-w-md w-full flex flex-col">
       <div className="px-4 pt-4 pb-3 shrink-0 flex items-start justify-between" style={{ background: "#12213A" }}>
         <div>
           <div className="text-[10px] font-bold uppercase tracking-wide text-white/50 mb-1">One more thing</div>
@@ -8845,11 +8956,12 @@ function FootagePromptStep({ match, onSaveMatch, onContinue }) {
           {hasFile ? "Continue without detecting" : "Not now — continue"}
         </button>
       </div>
+      </div>
     </div>
   );
 }
 
-function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatch, exercises, profile, onSaveProfile, plans, season, matches, adHocSessions, onUpdateSession, onSaveMatch, onReportGenerated, onClose }) {
+function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatch, exercises, profile, onSaveProfile, plans, season, matches, adHocSessions, onUpdateSession, onSaveMatch, onReportGenerated, onClose, guestTeammates, onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots }) {
   const [step, setStep] = useState("review");
   const [liveTeammateMatch, setLiveTeammateMatch] = useState(teammateMatch);
   const hasTeammateStep = kind === "match" && !!teammateOwnerId && !!liveTeammateMatch;
@@ -8906,6 +9018,10 @@ function PostRecordingFlow({ kind, session, match, teammateOwnerId, teammateMatc
       <FootagePromptStep
         match={match}
         onSaveMatch={onSaveMatch}
+        guestTeammates={guestTeammates}
+        onSaveGuestTeammate={onSaveGuestTeammate}
+        onConfirmGuestShots={onConfirmGuestShots}
+        onConfirmTeammateShots={onConfirmTeammateShots}
         onContinue={() => setStep("report")}
       />
     );
@@ -9192,6 +9308,10 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
       <FootagePromptStep
         match={footageStepMatch}
         onSaveMatch={onSave}
+        guestTeammates={guestTeammates}
+        onSaveGuestTeammate={onSaveGuestTeammate}
+        onConfirmGuestShots={onConfirmGuestShots}
+        onConfirmTeammateShots={onConfirmTeammateShots}
         onContinue={() => { setFootageStepMatchId(null); setOpenMatchId(footageStepMatch.id); }}
       />
     );
