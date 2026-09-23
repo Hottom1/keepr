@@ -330,6 +330,7 @@ export default function GKTrainerApp() {
   const [plans, setPlans] = useState([]);
   const [season, setSeason] = useState("Winter");
   const [tab, setTab] = useState("plans");
+  const [statsGuestFocus, setStatsGuestFocus] = useState(null);
   const [saveError, setSaveError] = useState(false);
   // profile.niggles (incl. rehabLog and files) is injury/rehab data. If a
   // public-profile sharing feature is ever built, it must construct an
@@ -838,6 +839,7 @@ export default function GKTrainerApp() {
             guestTeammates={guestTeammates}
             onSaveGuestTeammate={saveGuestTeammate}
             onDeleteGuestTeammate={deleteGuestTeammate}
+            onViewGuestStats={(guestId) => { setStatsGuestFocus(guestId); setTab("stats"); }}
           />
         )}
         {tab === "stats" && (
@@ -865,6 +867,8 @@ export default function GKTrainerApp() {
             onReportGenerated={addReportAndNotify}
             onOpenHelp={() => openHelp("stats-log-match")}
             onOpenMatchSetup={() => setPendingSetup({ kind: "match" })}
+            guestFocusId={statsGuestFocus}
+            onClearGuestFocus={() => setStatsGuestFocus(null)}
           />
         )}
         {tab === "kip" && (
@@ -2824,7 +2828,7 @@ function Plans({ plans, exercises, season, profile, onSave, onSaveProfile, onDel
           onClose={() => setAdHocLogTarget(null)}
           onSave={(session) => { onSaveAdHoc(session); setAdHocLogTarget(null); }}
           onDelete={() => { setConfirmDeleteAdHoc(adHocLogTarget.id); }}
-          onLogged={() => onSessionLogged({ kind: "adhoc", sessionId: adHocLogTarget.id })}
+          onLogged={() => onSessionLogged({ kind: adHocLogTarget.isWorkout ? "workout" : "adhoc", sessionId: adHocLogTarget.id })}
         />
       )}
 
@@ -3198,7 +3202,7 @@ function MatchSetupScreen({ season, matches, opponents, guestTeammates = [], onS
         </Field>
 
         <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
-          <div className="text-sm font-bold mb-1.5" style={{ color: "#12213A" }}>Recording with a teammate?</div>
+          <div className="text-sm font-bold mb-1.5" style={{ color: "#12213A" }}>Recording for a teammate?</div>
           {(teammateOptions.length > 0 || guestTeammates.length > 0) && (
             <div className="flex flex-wrap gap-1.5 mb-2.5">
               <button
@@ -4883,7 +4887,7 @@ function UploadsScreen({ profile, onSaveProfile, generalUploads, onAddGeneralUpl
 // overlay, since it's now scoped to this tab rather than floating above all
 // of them. onCancel is deliberately omitted from KipOnboarding here: there's
 // no other screen to cancel back to, Profile IS the destination.
-function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, season, onBulkAddMatches, guestTeammates = [], onSaveGuestTeammate, onDeleteGuestTeammate }) {
+function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, generalUploads, onAddGeneralUpload, onRemoveGeneralUpload, season, onBulkAddMatches, guestTeammates = [], onSaveGuestTeammate, onDeleteGuestTeammate, onViewGuestStats }) {
   const [showUploads, setShowUploads] = useState(false);
 
   if (showUploads) {
@@ -4921,7 +4925,7 @@ function ProfileTab({ profile, onSaveProfile, exercises, plans, onApplyPtPlan, g
       </div>
       <NotificationsSection profile={profile} onSaveProfile={onSaveProfile} />
       <TeammatesSection />
-      <GuestTeammatesSection guestTeammates={guestTeammates} onSave={onSaveGuestTeammate} onDelete={onDeleteGuestTeammate} />
+      <GuestTeammatesSection guestTeammates={guestTeammates} onSave={onSaveGuestTeammate} onDelete={onDeleteGuestTeammate} onViewStats={onViewGuestStats} />
     </div>
   );
 }
@@ -5245,7 +5249,7 @@ function TeammatesSection() {
 // list instead of a single field. Primarily managed inline wherever an
 // identity needs picking (match setup, video-detection setup); this section
 // is for reviewing/cleaning up the list afterward.
-function GuestTeammatesSection({ guestTeammates, onSave, onDelete }) {
+function GuestTeammatesSection({ guestTeammates, onSave, onDelete, onViewStats }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -5261,7 +5265,14 @@ function GuestTeammatesSection({ guestTeammates, onSave, onDelete }) {
           {guestTeammates.map((g) => (
             <div key={g.id} className="flex items-center justify-between bg-white rounded-md border px-2.5 py-1.5" style={{ borderColor: "#DAD7CC" }}>
               <div className="text-sm" style={{ color: "#12213A" }}>{g.name}{g.jerseyNumber ? ` · #${g.jerseyNumber}` : ""}</div>
-              <IconButton icon={X} size={13} label="Remove teammate" onClick={() => setConfirmDeleteId(g.id)} color="#C1483B" pad={9} />
+              <div className="flex items-center gap-1">
+                {onViewStats && (
+                  <button onClick={() => onViewStats(g.id)} className="text-[11px] font-bold px-2 py-1" style={{ color: "#0E8388" }}>
+                    View stats
+                  </button>
+                )}
+                <IconButton icon={X} size={13} label="Remove teammate" onClick={() => setConfirmDeleteId(g.id)} color="#C1483B" pad={9} />
+              </div>
             </div>
           ))}
           {guestTeammates.length === 0 && <div className="text-xs text-gray-400">None added yet.</div>}
@@ -7081,7 +7092,7 @@ function MatchFormModal({ season, matches, onClose, onSave, initialDate, title =
           <input className="input" placeholder="YouTube, Drive, wherever the footage lives" value={form.videoUrl} onChange={(e) => setForm({ ...form, videoUrl: e.target.value })} />
         </Field>
         {(teammateOptions.length > 0 || guestTeammates.length > 0 || onSaveGuestTeammate) && (
-          <Field label="Logging this for a teammate?">
+          <Field label="Recording for a teammate?">
             <div className="flex flex-wrap gap-1.5">
               <button
                 onClick={() => setForm({ ...form, teammateOwnerId: null, guestId: null })}
@@ -7373,6 +7384,7 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
 
   // Setup-stage state
   const [connections, setConnections] = useState([]); // fetched once, same pattern MatchSetupScreen already uses
+  const [connectionsError, setConnectionsError] = useState(false);
   const [viewerId, setViewerId] = useState(null);
   const [kitColor, setKitColor] = useState(match?.keeperKitColor || null);
   const [customHex, setCustomHex] = useState("#888888");
@@ -7390,11 +7402,15 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
   // itself uses once scanning starts, just fetched up front here so the
   // player has something to load immediately.
   const [previewUrl, setPreviewUrl] = useState(null);
+  const [previewUrlError, setPreviewUrlError] = useState(false);
 
   useEffect(() => {
     if (!match?.videoFile) return;
     let cancelled = false;
-    getSignedMatchVideoUrl(match.videoFile.path).then((url) => { if (!cancelled) setPreviewUrl(url); }).catch(() => {});
+    setPreviewUrlError(false);
+    getSignedMatchVideoUrl(match.videoFile.path)
+      .then((url) => { if (!cancelled) setPreviewUrl(url); })
+      .catch(() => { if (!cancelled) setPreviewUrlError(true); });
     return () => { cancelled = true; };
   }, [match]);
 
@@ -7434,7 +7450,7 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
   useEffect(() => {
     if (!match) return;
     let cancelled = false;
-    getMyConnections().then((rows) => { if (!cancelled) setConnections(rows); }).catch(() => setConnections([]));
+    getMyConnections().then((rows) => { if (!cancelled) setConnections(rows); }).catch(() => { if (!cancelled) { setConnections([]); setConnectionsError(true); } });
     supabase.auth.getUser().then(({ data }) => { if (!cancelled) setViewerId(data.user?.id || null); });
     return () => { cancelled = true; };
   }, [match]);
@@ -7701,17 +7717,26 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
                   className="w-9 h-9 rounded-full border-2 flex items-center justify-center"
                   style={{ background: c.hex, borderColor: kitColor?.name === c.name ? "#0E8388" : "#DAD7CC" }}
                   title={c.name}
+                  aria-label={c.name}
+                  aria-pressed={kitColor?.name === c.name}
                 >
-                  {kitColor?.name === c.name && <Check size={14} color={c.name === "White" || c.name === "Yellow" ? "#12213A" : "#fff"} />}
+                  {kitColor?.name === c.name && <Check size={14} color={["White", "Yellow", "Orange", "Pink"].includes(c.name) ? "#12213A" : "#fff"} />}
                 </button>
               ))}
               <label className="w-9 h-9 rounded-full border-2 flex items-center justify-center cursor-pointer" style={{ background: customHex, borderColor: kitColor?.hex === customHex && !KIT_COLOR_PRESETS.some((c) => c.name === kitColor?.name) ? "#0E8388" : "#DAD7CC" }}>
-                <input type="color" value={customHex} className="opacity-0 w-0 h-0" onChange={(e) => { setCustomHex(e.target.value); setKitColor({ name: "Other", hex: e.target.value }); }} />
+                <input type="color" value={customHex} aria-label="Custom kit color" className="opacity-0 w-0 h-0" onChange={(e) => { setCustomHex(e.target.value); setKitColor({ name: "Other", hex: e.target.value }); }} />
                 <Pencil size={12} color="#fff" />
               </label>
             </div>
             {kitColor && <div className="text-[11px] font-semibold" style={{ color: "#0E8388" }}>Selected: {kitColor.name}</div>}
           </div>
+
+          {connectionsError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
+              <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+              <div>Couldn't load your connected teammates — if one of them appears in this footage, they won't be selectable below. Guest teammates aren't affected.</div>
+            </div>
+          )}
 
           {allIdentities.length > 1 && (
             <div className="mb-4">
@@ -7724,7 +7749,7 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
               {multipleKeepers && (
                 <div className="bg-white rounded-lg border p-3" style={{ borderColor: "#DAD7CC" }}>
                   <div className="flex gap-2 mb-3">
-                    <button onClick={() => setSplitMethod("ranges")} className="flex-1 py-1.5 rounded-lg text-[11px] font-bold border" style={splitMethod === "ranges" ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>Mark time ranges</button>
+                    <button onClick={() => setSplitMethod("ranges")} className="flex-1 py-1.5 rounded-lg text-[11px] font-bold border" style={splitMethod === "ranges" ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>Mark time ranges <span className="opacity-70 font-semibold">(recommended)</span></button>
                     <button onClick={() => setSplitMethod("jersey")} className="flex-1 py-1.5 rounded-lg text-[11px] font-bold border" style={splitMethod === "jersey" ? { background: "#0E8388", color: "#fff", borderColor: "transparent" } : { borderColor: "#DAD7CC" }}>Use jersey numbers</button>
                   </div>
 
@@ -7746,7 +7771,8 @@ function VideoShotDetectionFlow({ videoFile, season, match, onSaveMatch, guestTe
                             style={{ aspectRatio: "16/9" }}
                             onLoadedMetadata={(e) => { setVideoDuration(e.currentTarget.duration); setRanges((prev) => prev.map((r) => (r.end === Infinity ? { ...r, end: e.currentTarget.duration } : r))); }}
                           />
-                          {!previewUrl && <div className="text-[11px] text-gray-400 mt-1.5">Loading video…</div>}
+                          {!previewUrl && !previewUrlError && <div className="text-[11px] text-gray-400 mt-1.5">Loading video…</div>}
+                          {previewUrlError && <div className="text-[11px] text-red-600 mt-1.5">Couldn't load this video for preview. You can still set splits by estimating from the timeline below, or try closing and reopening this screen.</div>}
                           <button onClick={addSplitHere} className="w-full py-2 rounded-lg text-xs font-bold border mt-2" style={{ borderColor: "#0E8388", color: "#0E8388" }}>Split here</button>
                           <p className="hidden sm:block text-[10px] text-gray-400 mt-1.5">
                             Keyboard: <span className="font-mono">←/→</span> nudge a frame, <span className="font-mono">shift+←/→</span> nudge a second, <span className="font-mono">space</span> play/pause, <span className="font-mono">S</span> split here.
@@ -8381,7 +8407,7 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
             )}
             {guestId && (
               <button
-                disabled={!guestMatch}
+                disabled={!guestMatch || teammateWritePending}
                 onClick={() => setActiveRecorder("guest")}
                 aria-pressed={activeRecorder === "guest"}
                 className="flex-1 py-1.5 rounded-md text-xs font-bold disabled:opacity-40"
@@ -8463,7 +8489,9 @@ function LiveMatchRecorder({ match, opponents = [], onUpdatePatch, onFinish, onE
           <h3 className="text-base font-black mb-2" style={{ color: "#12213A" }}>Delete this match?</h3>
           <p className="text-sm text-gray-600 mb-4">
             This match was created for this recording, so deleting it removes it — and any shots already logged — completely.
-            {teammateMatch ? ` Their linked match (and its shots) goes too.` : ""} This can't be undone.
+            {teammateMatch ? ` Their linked match (and its shots) goes too.` : ""}
+            {guestMatch && (guestMatch.shots || []).length > 0 ? ` ${guestName}'s ${guestMatch.shots.length} shot${guestMatch.shots.length !== 1 ? "s" : ""} stay${guestMatch.shots.length !== 1 ? "" : "s"} — that's saved separately, on its own.` : ""}
+            {" "}This can't be undone.
           </p>
           {deleteStatus === "teammate-failed" && (
             <div className="flex items-start gap-1.5 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-3">
@@ -9231,7 +9259,13 @@ function TrainingSessionDetail({ session, kind, season, exercises, onSaveSession
   );
 }
 
-function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots, onOpenLiveRecorder, onOpenTrainingSetup, onSavePlan, onSaveAdHoc, profile, onSaveProfile, reports = [], onReportGenerated, onOpenHelp, onOpenMatchSetup }) {
+function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSessions, opponents = [], onSaveOpponentRoster, guestTeammates = [], onSaveGuestTeammate, onConfirmGuestShots, onConfirmTeammateShots, onOpenLiveRecorder, onOpenTrainingSetup, onSavePlan, onSaveAdHoc, profile, onSaveProfile, reports = [], onReportGenerated, onOpenHelp, onOpenMatchSetup, guestFocusId, onClearGuestFocus }) {
+  const guestFocusRef = useRef(null);
+  useEffect(() => {
+    if (guestFocusId && guestFocusRef.current) {
+      guestFocusRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [guestFocusId]);
   const [openMatchId, setOpenMatchId] = useState(null);
   const [openTrainingId, setOpenTrainingId] = useState(null);
   // Match and Training are kept as two genuinely separate views, not a
@@ -9276,7 +9310,7 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
       }
     }
     const adhoc = adHocSessions.find((s) => s.recording);
-    return adhoc ? { kind: "adhoc", sessionId: adhoc.id } : null;
+    return adhoc ? { kind: adhoc.isWorkout ? "workout" : "adhoc", sessionId: adhoc.id } : null;
   })();
 
   const openMatch = matches.find((m) => m.id === openMatchId);
@@ -9601,10 +9635,15 @@ function StatsTab({ matches, season, onSave, onDelete, plans, exercises, adHocSe
               guest since one recording session could plausibly cover more
               than one guest across different matches. */}
           {guestMatches.length > 0 && (
-            <div className="mt-5">
-              <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400 mb-1.5">Recorded for a teammate</div>
+            <div className="mt-5" ref={guestFocusRef}>
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-gray-400">Recorded for a teammate</div>
+                {guestFocusId && (
+                  <button onClick={onClearGuestFocus} className="text-[11px] font-bold" style={{ color: "#0E8388" }}>Show all</button>
+                )}
+              </div>
               <div className="space-y-2">
-                {[...guestMatches].sort((a, b) => new Date(b.date) - new Date(a.date)).map((m) => {
+                {[...guestMatches].filter((m) => !guestFocusId || m.recordedForGuestId === guestFocusId).sort((a, b) => new Date(b.date) - new Date(a.date)).map((m) => {
                   const shots = m.shots || [];
                   const saves = shots.filter((s) => s.outcome === "Save").length;
                   const guestName = guestTeammates.find((g) => g.id === m.recordedForGuestId)?.name || "a teammate";
